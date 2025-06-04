@@ -1,0 +1,1029 @@
+CalculaRetencionesV2b
+Impuestos Nuevo		
+Calcula retenciones en egreso de valor (BDO 2025-04)
+{8DFBA4A6-7832-11D3-8D24-00002140D131}
+INICIOARGUMENTOS
+Transaccion
+{8DFBA4A6-7832-11D3-8D24-00002140D131}
+10
+FINARGUMENTOS
+INICIOSCRIPT
+'CalculaRetencionesV2b (BDO 2025-04)
+'Esta funcion es la misma que esta en Fastcloud (Version mas actual de este script en calipso)
+'Se comentaron algunas validaciones de campos que no se usan en BDO como xTransaccion.BOExtension.Anticipos y oTransaccion.BOExtension.estadoRetenciones
+'Para que funcione es necesario importar la funcion fGraboBucket
+'Por ahora solo se dejo como metodo de usuario para corregir problemas de calculos como los planteados en el ticket 18590
+'Se debe analizar y actualizar la funcion CalculaRetenciones con esta que es la version mas actual
+'Hector Figuera
+'--------------------------------------------------
+'2023/02/22 se cambio calculo de tucuman segun tk 124982
+'2022/07/27 se corrigio el log va de la mano con fGraboBucket
+'Fecha de revisión: 03/09/2018. Se hicieron modificaciones estructurales del script para que se pueda ejecutar desde un EV no generado por una OP. 
+public xTransaccionOrigen,esAnticipo, aCotizacion, aLogImpuesto, nombreBuscado, xSeparadorDecimal
+sub main
+senddebug "Inicio Funcion CalculaRetencionesV2"
+	xSeparadorDecimal = decimalseparator()
+	set oTransaccion 	   = Transaccion.value
+	esDesktop =  IsInteractive() 
+	aCotizacion 		   = oTransaccion.Cotizacion
+	
+	for each oImpuesto in oTransaccion.ImpuestosTransaccion
+		oImpuesto.Attributes("Recalcula").value = False	
+		oImpuesto.Coeficiente = 0
+		oImpuesto.Valor.Importe = 0
+		oImpuesto.valorimporte = 0
+	next
+	oTransaccion.BOExtension.retenciones = oTransaccion.total.unidadvalorizacion.simbolo & " " & FormatearNumero(0, 2, 2, xSeparadorDecimal) ' *** Funcion de Repositorio
+	
+	call eliminarImpuestosRetencion(oTransaccion)
+	call clearTransactionBuckets(oTransaccion)
+	'if NOT validaTransaccion(oTransaccion) then exit sub
+	
+	call EvaluaMonitoresTransaccion( oTransaccion, false )
+	
+	if esDesktop then call ProgressControl( oTransaccion.WorkSpace, "Cálculo de retenciones", 1, oTransaccion.impuestostransaccion.size )
+	'Para debuggear alguna retención en particular
+	stop
+	NOMBREBUSCADO = "Ret. Gan. Loc. Obras y Servicios"
+	senddebug "Impuesto Buscado: " & NOMBREBUSCADO
+	for each oImpuestoTransaccion in oTransaccion.impuestostransaccion	
+		if esDesktop then call ProgressControlAvance( oTransaccion.WorkSpace, "Calculando " & oImpuestoTransaccion.name )
+		'senddebug "Validando Impuesto: " & oImpuestoTransaccion.name
+		if instr(oImpuestoTransaccion.name, NOMBREBUSCADO) then stop
+		set oImpuesto = oImpuestoTransaccion.definicionimpuesto.impuesto
+		'senddebug "Procesando impuesto " & oImpuesto.Nombre   
+		if correspondeEsquema(oTransaccion.TrExtension.EsquemaOperativo, oImpuesto) and proveedorGravado(oTransaccion,oImpuesto) then 
+			call calcularRetencion(oTransaccion, oImpuestoTransaccion, oImpuesto)
+		end if 
+    next
+	
+	call completarTotalesCabecera(oTransaccion)
+    'oTransaccion.BOExtension.estadoRetenciones = "Calculadas"
+	call EvaluaMonitoresTransaccion( oTransaccion, true )
+	
+	if esDesktop then call ProgressControlFinish( oTransaccion.WorkSpace)
+end sub
+
+'--------------------------------------------------------------------------------------------------------------------------------------------
+'Funciones
+'--------------------------------------------------------------------------------------------------------------------------------------------
+private sub eliminarImpuestosRetencion(oTransaccion)
+	' set oViewRet =  NewCompoundView( oTransaccion, "IMPUESTORETENCION", oTransaccion.Workspace, nil, false )
+	' oViewRet.AddFilter(newFilterSpec(oViewRet.ColumnFromPath("TRANSACCION"), "=", oTransaccion.id))
+	' for each oRet in oViewRet.ViewItems
+		' oRet.BO.Delete
+	' next
+	for each xItem in oTransaccion.impuestosretencion
+		xItem.delete
+		' oTransaccion.impuestosretencion.remove(xItem)
+	next 
+end sub
+
+private function validaTransaccion(xTransaccion)
+	aMensaje = ""
+	validaTransaccion = true
+	if xTransaccion.ItemsCancelacionFinanzas.size = 0 and xTransaccion.BOExtension.Anticipos.Size = 0 then
+	   validaTransaccion = false
+	else
+		for each item in xTransaccion.ItemsCancelacionFinanzas 
+			if item.referencia is nothing then
+			   BOShowMessage "Debe asignar un compromiso en todos los items del listado comprobantes a pagar."
+			   validaTransaccion = false
+			   exit for
+			end if
+		next
+		for each item in xTransaccion.BOExtension.Anticipos 
+			if item.referencia is nothing then
+			   BOShowMessage "Debe asignar una referencia en todos los ítems del listado de anticipos."
+			   validaTransaccion = false
+			   exit for
+			end if
+		next
+	end if
+end function
+
+'Limpia las transacciones calculadas
+private function clearTransactionBuckets(xTransaccion)
+	set xVista = NewCompoundView( xTransaccion, "IMPUESTORETENCION", xTransaccion.Workspace, nothing, false )
+	xVista.addfilter(NewFilterSpec( xVista.columnfrompath("TRANSACCION"), "=", xTransaccion.id ))
+	for each xItemv in xVista.ViewItems
+		xItemv.bo.delete
+	next
+end function
+
+'Completa el total de retenciones y el total a cancelar en la cabecera. 
+private sub completarTotalesCabecera(oTransaccion)
+	xTotal = 0
+	for each item in oTransaccion.ItemsTransaccion
+		xTotal = xTotal + item.valor.importe
+	next
+
+	xTotalCancela = 0
+	for each item in oTransaccion.ItemsCancelacionFinanzas
+		xTotalCancela = xTotalCancela + item.valor.importe
+	next 
+
+	'for each item in oTransaccion.boextension.anticipos
+	'	xTotalCancela = xTotalCancela + item.total
+	'next
+
+	xRetenciones = 0
+	for each item in oTransaccion.ImpuestosTransaccion
+		if item.incide then
+			xRetenciones = xRetenciones + item.valor.importe
+		end if
+	next 
+
+	xTotalCancela = xTotalCancela - xRetenciones
+	aTotalF = xTotalCancela - xTotal
+
+	aLargo = len(cstr(round(aTotalF,0)))
+	if aLargo = 0 then aLargo = 1
+	oTransaccion.BOExtension.IMPORTE_RESTANTE=  oTransaccion.total.unidadvalorizacion.simbolo & " " &  FormatearNumero(aTotalF, aLargo, 2, xSeparadorDecimal) 
+
+	aLargo = len(cstr(round(xRetenciones ,0)))
+	if aLargo = 0 then aLargo = 1
+	oTransaccion.BOExtension.retenciones = oTransaccion.total.unidadvalorizacion.simbolo & " " & FormatearNumero(xRetenciones, aLargo, 2, ",") 
+	oTransaccion.cancela.importe		 = xTotalCancela
+	
+end sub
+
+'Evalúa si ese impuesto debe calcularse a partir del esquema de la transacción
+function correspondeEsquema(xEsquemaOperativo, xImpuesto)
+	corresponde = false
+	if xImpuesto.ItemsEsquemaOperativo.size = 0 then 
+	   corresponde = true
+	else
+		if NOT xEsquemaOperativo is nothing then
+	   	   for each oEsq in xIMpuesto.ItemsEsquemaOperativo
+	   	   	    if oEsq.esquemaoperativo.id = xEsquemaOperativo.id then 
+					corresponde = true
+					exit for
+				end if 
+	       next
+	    end if
+	end if
+	correspondeEsquema = corresponde
+end function
+
+'Evalúa si el proveedor está gravado ante el impuesto. 
+private function proveedorGravado(xTransaccion,xImpuesto)
+	calcula = false
+	set xPosicion = GetPosicionImpuesto( xTransaccion.destinatario, xImpuesto.nombre )
+	if NOT xPosicion is nothing then
+		if xposicion.posicionimpuesto.coeficientedefault <> 0  then
+			calcula = true
+		end if
+	end if
+	proveedorGravado = calcula
+end function
+
+'Calcula la retención correspondiente al impuesto pasado por parámetro y la agrega a la transacción
+private sub calcularRetencion(oTransaccion, oImpuestoTransaccion, oImpuesto) 
+	set oConfiguracion = oImpuesto.boextension	
+	call resetLogImpuesto()
+	call addLogImpuesto(oImpuesto.name)	  
+	TotalDivisor    = 1
+	ValoresPrevios  = 0
+	Recorre 		= false
+	Acumulado2		= 0
+	esAnticipo = esTRAnticipo(oTransaccion)
+	'----------------------
+	if esAnticipo then 
+		set oItemsAnticipo = newContainer
+		for each oOrigen in oTransaccion.GeneradaPor.TransaccionesOrigen
+			for each oItemTR in oOrigen.ItemsTransaccion
+				oItemsAnticipo.Add(oItemTR)
+				aTotalEV = aTotalEV + (oItemTR.Valor.Importe * oTransaccion.Cotizacion)
+			next
+		next
+		set oListaOrigen = oItemsAnticipo
+		'----------------------
+		for each oItem in oListaOrigen
+			call calcularRetencionItem(oItem, oImpuesto, oConfiguracion, oTransaccion, ValoresPrevios, Acumulado2, Coeficiente, RetencionTotal, YaRetenido, RetencionActual, Recorre, oImpuestoTransaccion)
+		next
+		'----------------------
+		'BDO no maneja los anticipos por estos campos
+		'for each oItem in oTransaccion.BOExtension.Anticipos
+		'	call calcularRetencionItem(oItem, oImpuesto, oConfiguracion, oTransaccion, ValoresPrevios, Acumulado2, Coeficiente, RetencionTotal, YaRetenido, RetencionActual, Recorre, oImpuestoTransaccion)
+		'next
+	'----------------------
+	else
+		for each oItem in oTransaccion.ItemsCancelacionFinanzas
+			call calcularRetencionItem(oItem, oImpuesto, oConfiguracion, oTransaccion, ValoresPrevios, Acumulado2, Coeficiente, RetencionTotal, YaRetenido, RetencionActual, Recorre, oImpuestoTransaccion)
+		next
+	end if
+	'----------------------		
+	if Recorre then call grabarRetencion(oTR, oImpuesto, Acumulado2, oImpuesto.MinNoimponible, Coeficiente, RetencionTotal, yaRetenido, RetencionActual, oTransaccion) 	
+end sub
+
+'Calcula la retencion de un compromiso o anticipo
+private sub calcularRetencionItem(oItem, oImpuesto, oConfiguracion, oTransaccion, ValoresPrevios, Acumulado2, Coeficiente, RetencionTotal, YaRetenido, RetencionActual, Recorre, oImpuestoTR)
+	ValorActual     = 0
+	set oTR = oTransaccion
+	call obtenerDatos(oItem, oTR, oEntidad, aMontoOrden, aTotalTR, aPorcentajeOrden, aTotalItem, oReferencia, oDom, oDomE, oDomP, oImpuesto)
+	coeficienteZona   = obtenerCoeficienteZona(oDom, oDomE, oDomP, oConfiguracion, oImpuesto)
+	if coeficienteZona >  0 then
+		Recorre = true 	 					 			   				  
+		if NOT oConfiguracion.BaseImponible is nothing then ValorActual = obtenerBaseImponible(oConfiguracion.BaseImponible, oTR, oImpuesto, aTotalTR, oReferencia, aTotalItem, aPorcentajeOrden) 	
+		
+		MinDocumento = oImpuesto.mindocumento
+		MinNoImponible = oImpuesto.minnoimponible
+		MinimoRetener = oImpuesto.minaret
+		
+		call obtenerExcepcionesPorEntidad(oEntidad, oImpuesto, oConfiguracion, MinDocumento, MinNoImponible, MinimoRetener) 
+		call obtenerAcumulado(acumulado, acumulado2, oConfiguracion, oTransaccion, oTR, oImpuesto, ValorActual, ValoresPrevios, aPorcentajeOrden)				
+		'Vemos si tiene alguna validacion de Minimos
+		Calcula   		= ComprobarMinimos(aTotalTR, acumulado, MinDocumento, MinNoImponible, oEntidad)
+		Coeficiente 		= BuscarCoeficiente(oImpuesto, acumulado, oTransaccion, oEntidad, MinNoImponible)	
+		if calcula then
+			senddebug "Si calcula retencion"
+			yaRetenido 		= 0
+			retencionTotal   = 0
+			retencionActual  = 0
+			'Vemos si hay minimo no imponible por si hay que descontarlo
+			if oImpuesto.minnoimponible <> 0  then
+				acumulado = acumulado - oImpuesto.minnoimponible
+				''Vemos el valor a descontar si es que tiene una tabla impositiva asociada
+				acumulado = acumulado - MinimoTabla(oImpuesto, acumulado2 - oImpuesto.minnoimponible, oTransaccion)
+			end if
+
+		   'Líneas de abajo puestas para sacar la retención ya realizada
+			yaRetenido      = getRetenido(oImpuesto, oTransaccion, oConfiguracion)
+			valorTablaCorrespondiente = ValorTabla(oImpuesto, acumulado2 - MinNoImponible, oTransaccion)
+			retencionTotal  = (acumulado * Coeficiente * coeficienteZona) / 10000 + valorTablaCorrespondiente
+			call CompletarLogRetencionTotal(acumulado, Coeficiente, coeficienteZona, valorTablaCorrespondiente)
+			retencionActual = retencionTotal - yaRetenido
+			call addLogImpuesto(vbTab & "La retencion actual es de " & retencionTotal & " (retenciontotal) - " & yaRetenido & " (yaretenido)")		   
+			'Vemos si sobrepasa el minimo a retener
+			if oImpuesto.minaret =< ((oImpuestoTR.valor.importe * aCotizacion) + retencionActual)then 
+				oImpuestoTR.valor.importe = round(retencionActual / aCotizacion,2)
+				oImpuestoTR.Coeficiente = Coeficiente
+			else
+				yaRetenido      = 0
+				retencionTotal  = 0
+				retencionActual = 0
+			end if
+		end if
+	end if
+	Coeficiente = oImpuestoTR.Coeficiente
+	ValoresPrevios = ValorActual + ValoresPrevios
+	Valoractual = 0	
+end sub
+
+private function CompletarLogRetencionTotal(acumulado, Coeficiente, coeficienteZona, valorTablaCorrespondiente)
+	call addLogImpuesto(vbTab & "La retencion total se compone desde la siguiente formula: " )
+	call addLogImpuesto(vbTab & vbTab & "Acumulado por " & acumulado)
+	call addLogImpuesto(vbTab & vbTab & "Un coeficiente de " & Coeficiente)
+	call addLogImpuesto(vbTab & vbTab & "Un coeficiente de zona de " & coeficienteZona)
+	data = vbTab & "Esto seria  (" & acumulado & " * " & Coeficiente & " * " & coeficienteZona & ") / 10000 "
+	if valorTablaCorrespondiente > 0 then
+		call addLogImpuesto(vbTab & vbTab & vbTab & "Un valor de tabla " & valorTablaCorrespondiente)
+		data = data & " + " & valorTablaCorrespondiente
+	end if	 
+	call addLogImpuesto(data) 
+end function
+
+'Obtiene los datos del anticipo o compromiso a pagar. 
+sub obtenerDatos(oItem, oTR, oEntidad, aMontoOrden, aTotalTR, aPorcentajeOrden, aTotalItem, oReferencia, oDomicilio, oDomicilioE, oDomicilioP, oImpuesto)
+	set oTR 		= nothing
+	set oDomicilio  = nothing
+	set oDomicilioE = nothing
+	set oReferencia = nothing
+	'----------------------
+	'Evalúa si es un anticipo o un compromiso
+	if esAnticipo then 'Se cambia la validacion ya que en BDO el anticipo no funciona asi
+	'if classname(oItem) = "UD_ANTICIPO" then
+		set oEntidad	= oItem.bo_place.bo_owner.destinatario
+		set oDomicilioP = oEntidad.EnteAsociado.domicilioprincipal
+		'----------------------
+		'Se comenta porque en BDO no existen estos campos de Fastcloud
+		'set oTR     = oItem
+		'aMontoOrden = oItem.Total
+		'aTotalTR	   = aMontoOrden
+		'aTotalItem  = oItem.Subtotal
+		'set oReferencia	= oItem.Referencia
+		'set oDomicilio   = oItem.Domicilio
+		'set oDomicilioE  = oItem.DomicilioEntrega  
+		'aPorcentajeOrden = 100
+		'----------------------
+		set oTR				= oItem
+	    aMontoOrden			= oTR.valor.importe 
+	    aTotalTR			= aMontoOrden
+	    aTotalItem			= oTR.boextension.subtotal
+	    set oReferencia		= oTR.boextension.referenciacomercial 
+	    set oDomicilio		= oTR.boextension.domicilio
+	    set oDomicilioE		= oTR.boextension.domicilioentrega  
+	    aPorcentajeOrden	= 100
+	    call addLogImpuesto(vbTab & "Anticipo por " & aTotalTR)
+		'----------------------
+	'----------------------
+	else
+		set oEntidad	= oItem.bo_place.bo_owner.Destinatario
+		set oDomicilioP = oEntidad.EnteAsociado.DomicilioPrincipal
+		aMontoOrden = oItem.Valor.Importe
+		aMontoTope = oItem.tope.Importe
+		set oTR 	= oItem.Referencia.TROriginante
+		aTotalTR	= oTR.Total.Importe
+		aTotalItem	= 0
+		aSubtotal	= oItem.Referencia.troriginante.subtotal.importe
+	   	set oDomicilio  = oTR.Domicilio
+	   	set oDomicilioE = oTR.DomicilioEntrega
+		
+		call addLogImpuesto(vbTab & "Calcula Una Vez: " & oImpuesto.boextension.calculaunavez)
+		xBaseImponible = "No Definida"
+		if NOT oImpuesto.boextension.baseimponible is nothing then xBaseImponible = oImpuesto.boextension.baseimponible.codigo & " - " & oImpuesto.boextension.baseimponible.nombre
+		call addLogImpuesto(vbTab & "Base Imponible: " & xBaseImponible)
+		call addLogImpuesto(vbTab & "Transaccion " & oTR.name)
+
+	   	if oImpuesto.boextension.calculaunavez then
+			''Si calcula una vez, hay que hacer todo sobre el porcentaje total de la orden menos lo que tiene de nota de credito
+			porcentajeDeOrdenPorNC = calculaPorcentajeOrden(oTR, aSubtotal, oImpuesto.boextension, oImpuesto, xNCAplicadas)
+			aPorcentajeOrden = 100 - porcentajeDeOrdenPorNC
+	   	else
+			'aPorcentajeOrden  = (aMontoOrden * 100) / aTotalTR
+			'--------------------------------------------------
+			'Se agrega para el calculo de EV cuyas facturas tienen Anticipos previos - Ticket 9210
+			'Este calculo esta asi en la ultima version de la funcion CalculaRetenciones de fastcloud
+            aPorcentajeOrden  = (aMontoOrden * 100) / aMontoTope
+			'--------------------------------------------------
+			call addLogImpuesto(vbTab & vbTab & "Porcentaje a pagar respecto a la orden " & aPorcentajeOrden & "% ")
+		end if
+	end if
+	'----------------------
+end sub
+
+'Obtiene la base imponible con sus respectivos datos a partir de la configuración, 01: Código de impuesto, 02: Item Neto
+function obtenerBaseImponible(oBaseImponible, xTR, xImpuesto, aTotalTR, oReferencia, aTotalItem, aPorcentajeOrden) 			 
+	ValorActual = 0
+	if NOT oBaseImponible is nothing then 
+		if oBaseImponible.codigo = "01" then 
+			ValorActual  = (aTotalTR * aPorcentajeOrden) / 100		
+		elseif oBaseImponible.codigo = "02" then
+			if oReferencia is nothing then
+				for each xItem in xTR.itemstransaccion
+					ValorActual = ValorActual + obtenerBaseItem(xItem.Referencia, xItem.Total.Importe, aPorcentajeOrden, xImpuesto)
+				next 
+			else
+				ValorActual = ValorActual + obtenerBaseItem(oReferencia, aTotalItem, aPorcentajeOrden, xImpuesto)
+			end if
+		elseif oBaseImponible.codigo = "03" then
+			ValorActual = calculaTotalImpuestos(xImpuesto.boextension.impuestoscalculo,xTr) 
+		elseif oBaseImponible.codigo = "04" then
+			for each xItem in xTR.itemstransaccion
+				xValorObtenido = calculaTotalImpuestosDelItem(xImpuesto.boextension.impuestoscalculo,xItem)
+				ValorActual = ValorActual +  obtenerBaseItem(xItem.Referencia, xValorObtenido, aPorcentajeOrden, xImpuesto)	   	   	 	 
+			next 
+		end if
+	end if 
+	obtenerBaseImponible = ValorActual * aCotizacion
+	call addLogImpuesto(vbTab & vbTab & "La base imponible es por " & obtenerBaseImponible & " ( " & xTR.name & ") ")
+end function
+
+sub obtenerExcepcionesPorEntidad(xEntidad, xImpuesto, xConfiguracion, MinimoDocumento, MinimoNoImponible, MinimoRetener)
+	' senddebug "Buscando excepciones de entidad: " & xEntidad.name
+	set posicion = getposicionimpuestoporcodigo(xEntidad,xImpuesto.codigo)
+	'Buscamos si esta dentro de una excepcion
+	if NOT posicion is nothing then
+		set xvista = NewCompoundView( xEntidad, "ud_excepcion", xEntidad.Workspace, xConfiguracion.excepciones, false )
+		xvista.addfilter(NewFilterSpec( xvista.columnfrompath("[posicionimpuesto]posicion.nombre"), "=", posicion.posicionimpuesto.nombre ))						
+		if NOT xVista.viewitems.isempty then 'elementosEnVista(xVista) <> 0 then
+			MinimoDocumento   = (xvista.viewitems.first.current.bo).minimodocumento
+			MinimoNoImponible = (xvista.viewitems.first.current.bo).baseimponible
+			MinimoRetener     = (xvista.viewitems.first.current.bo).minaret
+		end if
+	end if
+end sub
+
+''Busca acumulado
+sub obtenerAcumulado(acumulado, acumulado2, xConfiguracion, xTransaccion, xTR, xImpuesto, ValorActual, ValoresPrevios, PorcentajeOrden)
+	acumulado = 0
+	if NOT xConfiguracion.acumulado is nothing then acumulado = getAcumulado(xConfiguracion,xTransaccion)
+	if xConfiguracion.calculaunavez then
+		if NOT estaPagado(xTransaccion,xImpuesto) then acumulado = acumulado + ValorActual + ValoresPrevios
+	else 
+		'acumulado  = acumulado + ValoresPrevios + ValorActual  '+ BuscaValorAsociadas(xTr,ValorActual,PorcentajeOrden,xImpuesto)
+		acumulado  = acumulado + ValoresPrevios + BuscaValorAsociadas(xTr,ValorActual,PorcentajeOrden,xImpuesto)							   
+		'acumulado2 = acumulado
+		''xItemCancelacion.itempendiente.itemtransaccion.valor2_importe * (ValorActual / TotalDivisor)
+	end if
+	acumulado2 = acumulado
+end sub
+
+function EsTrValida(oTransaccion) 
+  EsTrValida = false
+  select case classname(otransaccion)
+	case "TRFACTURACOMPRA","TRDEBITOCOMPRA": EsTrValida = true
+  end select 
+end function 
+
+function calculaPorcentajeOrden(xTr,aTotalTR, xConfiguracion, xImpuesto, xNCAplicadas)
+	aTotalGr = obtenerBaseImponible(xConfiguracion.BaseImponible, xTr, xImpuesto, 0, nothing, 0, 100) 
+	if aTotalGr > 0 then 
+		set xContainer = buscarImputacionesCreditosEgreso(xTR)
+		xTotalNC = 0
+		xNCAplicadas = ""
+		if xContainer.size <> 0 then 
+			call addLogImpuesto(vbTab & vbTab & "Notas de Creditos a Analizar: ")
+			for each xRes in xContainer 
+				set oCredito = obtenerCredito(xRes)
+				xNCAplicadas = oCredito.TrOriginante.numerodocumento & ";"
+				if xConfiguracion.BaseImponible.codigo = "02" then
+				   xTotalNC = xTotalNC + obtenerBaseImponible(xConfiguracion.BaseImponible, oCredito.TrOriginante, xImpuesto, 0, nothing, 0, 100) 
+				else
+					xTotalNC = xTotalNC + oCredito.TrOriginante.Subtotal.Importe
+				end if
+			next
+			call addLogImpuesto(vbTab & vbTab & "Importe por notas de Creditos: " & xTotalNC * -1)
+		else
+			call addLogImpuesto(vbTab & vbTab & "Sin Notas de Creditos aplicadas")
+		end if 
+		call addLogImpuesto(vbTab & vbTab & "Porcentaje a aplicar por NCS: " & (xTotalNC * 100) / aTotalGr & "%")
+		calculaPorcentajeOrden = (xTotalNC * 100) / aTotalGr
+	else
+		
+	end if 
+end function
+
+private function obtenerCredito(xRes)
+	if classname(xRes.Originante) = "CPCREDITO" then set obtenerCredito = xRes.Originante else set obtenerCredito = xRes.Destinatario
+end function
+
+function buscarImputacionesCreditosEgreso(xTransaccion)
+	set xContainer = newcontainer
+	set xVista =  NewCompoundView( xTransaccion, "DETALLEIMPUTACION", xTransaccion.Workspace, nothing, false )
+	xVista.addfilter(NewFilterSpec(xVista.columnfrompath("[ITEMTRIMPUTACION]ITEMIMPUTACION.[TRIMPUTACION]PLACEOWNER.[TREXTENSION]TREXTENSION.REVERSION"), " = ",false))
+	set xFilterOri = NewFilterSpec(xVista.columnfrompath("ORIGINANTE"), "=",xTransaccion.CompromisoPago.id)
+	xFilterOri.beginblock = "("
+	xVista.addFilter(xFilterOri)
+	set xFilterDes = NewFilterSpec(xVista.columnfrompath("DESTINATARIO"), "=",xTransaccion.CompromisoPago.id)
+	xFilterDes.endblock = ")"
+	xFilterDes.conector = "or"
+	xVista.addFilter(xFilterDes)
+	for each xRes in xVista.viewitems
+		set xLinea = xRes.bo
+		if classname(xLinea.destinatario) = "CPCREDITO" or classname(xLinea.originante) = "CPCREDITO" then
+			xContainer.add(xLinea)
+		end if
+	next
+	set buscarImputacionesCreditosEgreso = xContainer
+end function
+
+'Obtiene la base imponible de un item. 
+function obtenerBaseItem(oReferencia, aTotalItem, aPorcentajeOrden, xImpuesto)
+	aValor = 0
+	set Posicion = getposicionimpuestoporcodigo(oReferencia,xImpuesto.codigo)
+	if NOT posicion is nothing then
+	   TotalItem = (aTotalItem * aPorcentajeOrden) / 100
+	   aValor    = (TotalItem * posicion.posicionimpuesto.coeficientedefault / 100)						
+	end if
+	obtenerBaseItem = aValor
+end function
+
+'Obtiene el coeficiente de la provincia. Si el impuesto no valida por zona devuelve 100. 
+function obtenerCoeficienteZona(oDom, oDomE, oDomP, xConfiguracion, xImpuesto) 
+	coeficienteZona = 100
+	set oDomicilio = nothing
+	if NOT xConfiguracion.Domicilio is nothing then
+		coeficienteZona = 0
+		coeficientePais = 0
+		coeficienteProv = 0 
+		aTipo = xConfiguracion.Domicilio.Codigo
+		select case aTipo
+			case "DF" : set oDomicilio = oDom
+			case "DE" : set oDomicilio = oDomE
+			case "DP" : set oDomicilio = oDomP
+		end select  
+		if NOT oDomicilio is nothing then
+			if NOT oDomicilio.Pais is nothing then 
+				set posicion = getposicionimpuestoporcodigo(oDomicilio.Pais,xImpuesto.codigo)
+				if NOT posicion is nothing then
+					coeficientePais = posicion.posicionimpuesto.coeficientedefault
+					if NOT oDomicilio.Provincia is nothing then
+						set posicionProv = getposicionimpuestoporcodigo(oDomicilio.Provincia,xImpuesto.codigo)
+						if NOT posicionProv is nothing then
+							coeficienteProv = posicionProv.posicionimpuesto.coeficientedefault
+							coeficienteZona = (coeficienteProv * coeficientePais)/100
+						end if
+					end if
+				end if
+			end if
+		end if 
+		call addLogImpuesto(vbTab & vbTab & "Evalua Domicilio(Si): " & aTipo & " Coeficiente Domicilio: " & coeficienteZona & "% = (" & coeficienteProv & "*" & coeficientePais & ")/100 ((CoeficienteProv * CoeficientePais)/100)")
+	end if
+	obtenerCoeficienteZona = coeficienteZona
+end function
+
+private function BuscaValorAsociadas(xTr,aPagar,Porcentaje,oImpuesto)
+	Total = aPagar
+	if not esAnticipo then
+	'if classname(xtr) <> "UD_ANTICIPO" then
+		for each xImputacion in buscarImputacionesCreditosEgreso(xTr)
+			set xNota = nothing
+			if classname(xImputacion.originante) = "CPCREDITO" then
+			   set xNota = xImputacion.originante
+			end if
+			if classname(xImputacion.destinatario) = "CPCREDITO" then
+			   set xNota = xImputacion.destinatario
+			end if
+			if NOT xNota is nothing then	
+				if instr(oImpuesto.name, nombreBuscado) then stop
+			   TotalNota = xNota.ImporteTotal.Importe
+			   if NOT oImpuesto.boextension.BaseImponible is nothing then xValorActual = obtenerBaseImponible(oImpuesto.boextension.BaseImponible, xNota.troriginante, oImpuesto, TotalNota, nothing, 0, 100)
+			   Total = Total - (xValorActual * Porcentaje) / 100
+			end if
+		next
+	end if
+	aPagar = Total
+	BuscaValorAsociadas = Total
+end function	
+
+'Funcion que ve si los minimos estan siendo respetados
+private function ComprobarMinimos(xTotalDocumento,xTotal,MinimoDocumento,MinimoNoImponible,xEntidad)
+	Calcula = true
+	if MinimoDocumento <> 0 then
+		if (xTotalDocumento * aCotizacion) < MinimoDocumento then
+		   Calcula = false
+		end if
+	elseif MinimoNoImponible <> 0  then
+	   if (xTotal * aCotizacion) < MinimoNoImponible then
+	   	   Calcula = false	  
+	   end if
+	end if
+	ComprobarMinimos = calcula	
+	call addLogImpuesto(vbTab & vbTab & "Supera los minimos: " & ComprobarMinimos)
+end function
+
+sub grabarRetencion(xTR, xImpuesto, Acumulado2, MinimoNoImponible, Coeficiente, RetencionTotal, yaRetenido, RetencionActual, xTransaccion)
+    ''Le restamos al campo egresa la retencion de este impuesto
+	'xTransaccion.cancela.importe = round(xTransaccion.cancela.importe - RetencionActual,2)
+	set xOrdenPago            = xTransaccion				   ' 1.    xCODIGO_IMPUESTO.value  ( código del impuesto)
+	CodigoImpuesto 			  = xImpuesto.codigo 		 	 	   ' 2.    xNOMBRE_IMPUESTO.value  ( nombre del impuesto)
+	NombreImpuesto 			  = xImpuesto.nombre				   ' 3.    xDOCUMENTO.value ( campo nombre de la transacción de orden de pago por lo q veo en la base del FWMEPrueba) 
+	Documento 	   			  = xOrdenPago.numerodocumento		   ' 4.    xFECHA.value ( fecha de la transacción de orden de pago)
+	Fecha 		   			  = xOrdenPago.fechaactual			   ' 5.    xCOMENTARIOS.value ( Descripción del cálculo utilizado)
+	Comentario 	   			  = ""								   ' 6.    xNETO_ACUMULADO.value ( Neto total acumulado. En el ejemplo, cuando pagás la segunda factura acá iría 7000)
+	NetoAcumulado  			  = round(acumulado2,2)				   ' 7.    xMINIMO_NOIMPONIBLE.value ( Mínimo no imponible que se saca del impuesto. Puede ser tmb el mínimo de documento. En el ejemplo 4000)
+	MinimoDoc 	   			  = MinimoNoImponible				   ' 8.    xNETO_GRAVADO.value ( En el ejemplo, acá irían 3000)
+	NetoGravado    			  = round(acumulado2 - MinimoNoImponible,2)' 9.    xCOEFICIENTE.value  ( En el ejemplo acá iría 1%. Nosotros lo sacaríamos haciendo coeficiente provincia * coeficiente proveedor * coeficiente producto / 10000, porque recordemos que 2 de estos 3 iban a ser 100)
+	coeficiente    			  = coeficiente	 					   '10.    xRETENCION_TOTAL.value  ( en el ejemplo, acá iría 30) ' Tiene Valor Arriba en retencionTotal
+	RetencionTotal        	  = round(retencionTotal,2)			   '11.    xRETENCION_ANTERIOR.value ( en el ejemplo, acá iría 10)
+	retencionAnterior 		  = round(yaRetenido,2)				   '12.    xRETENCION_ACTUAL.value ( en el ejemplo, acá iría 20) 'Tiene valor arriba en retencionActual
+	RetencionActual 		  = round(retencionActual,2)		   '13.    xEXENCION.value ( Coeficiente de exención que se busca de la solapa con ese nombre de proveedores)
+	xEXENCION 				  = ""								   '14.    xVARIOS.value	 ( No tengo idea)
+	xVARIOS 				  = 0								   '15.    XTRANSACCION.Value 
+	set xTransaccionBucket 	  = xTransaccion					   '16.    xAUXTXT1.value ( no tengo idea)
+	xAUXTXT1 				  = 0								   '17.    xAUXNUM2.value ( no tengo idea)
+	xAUXNUM2 				  = 0								   '18.    xAUXNUM3.value ( no tengo idea)
+	xAUXNUM3 				  = 0		
+	
+	call fGraboBucket2( CodigoImpuesto, NombreImpuesto, Documento, Fecha, Comentario, NetoAcumulado, MinimoDoc, NetoGravado, Coeficiente, RetencionTotal, retencionAnterior, RetencionActual, xEXENCION, xVARIOS, xTransaccionBucket, xAUXTXT1, xAUXNUM2, xAUXNUM3, aLogImpuesto )
+end sub
+
+private function estaPagado(xTransaccion,xImpuesto)
+	set xVista = NewCompoundView( xTransaccion, "ITEMCANCELACIONFINANZAS", xTransaccion.Workspace, nothing, false )
+	xVista.addfilter( NewFilterSpec( xvista.columnfrompath("[COMPROMISOPAGO]REFERENCIA.TRORIGINANTE"), "=", xTransaccion.id ))
+	xVista.addfilter( NewFilterSpec( xvista.columnfrompath("[TREGRESOVALORES]PLACEOWNER.[TIPOTRANSACCION]TIPOTRANSACCION.CODIGO"), "=", "TS03" )) 'Egreso de valores
+	xVista.addfilter( NewFilterSpec( xVista.columnfrompath("[TREGRESOVALORES]PLACEOWNER.ESTADO"),"=","C"))
+	set xFilter = NewFilterSpec( xVista.columnfrompath("[TREGRESOVALORES]PLACEOWNER.FLAG"),"is",nothing)
+	xFilter.beginblock = "("
+	xVista.addfilter(xFilter)
+	set xFilter = NewFilterSpec( xVista.columnfrompath("[TREGRESOVALORES]PLACEOWNER.[FLAG]FLAG.DESCRIPCION"),"not like","%nulad%")
+	xFilter.conector = "or"
+	xFilter.endblock = ")"
+	xVista.addfilter(xFilter)
+	if NOT xVista.viewitems.isempty then 'elementosEnVista(xVista) <> 0 then
+       estaPagado = true
+  	   call addLogImpuesto(vbTab & vbTab & "La transaccion ya esta pagada")
+   else
+       estaPagado = false
+   end if
+end function
+
+function esTRAnticipo(xTransaccion)
+    esTRAnticipo = false
+    set oCompania = xTransaccion.Compania
+	if NOT xTransaccion.generadapor is nothing then
+		set oOrigen = xTransaccion.generadaPor.TransaccionesOrigen.First.Current
+		if NOT oOrigen is nothing then
+			set oOTERet = ExisteBO( xTransaccion, "TIPOTRANSACCION", "ID", oOrigen.TipOTransaccion.Id, oCompania.BOExtension.OTEsAnticipo, false, false, "=" )
+			if NOT oOTERet is nothing then esTRAnticipo  = true  
+		end if
+	end if
+end function
+
+'Indica si deben calcularse retenciones o no.
+function calculaOP(xTransaccion, esAnticipo)
+	set oCompania = xTransaccion.Compania
+	if esAnticipo then
+	   calculaOP = xTransaccion.GeneradaPor.TransaccionesOrigen.First.Current.BOExtension.CALCULA_RET_ANTICIPO
+	else 
+	   set oOrigen = xTransaccion.generadaPor.TransaccionesOrigen.First.Current
+       if NOT oOrigen is nothing then
+       	  set oOTERet = ExisteBO( xTransaccion, "TIPOTRANSACCION", "ID", oOrigen.TipOTransaccion.Id, oCompania.BOExtension.OTEsConRetencion, false, false, "=" )
+       	  if NOT oOTERet is nothing then calculaOP  = true 
+	   end if
+	end if
+end function
+
+'Funcion que obtiene los acumulados de las retenciones anteriores
+private function getAcumulado(xImpuesto,xTransaccion)
+	acumulado = 0
+	if xImpuesto.acumulado is nothing then xTipoAcumulado = "No Definido" else xTipoAcumulado = xImpuesto.acumulado.codigo & " - " & xImpuesto.acumulado.nombre
+	
+	set xVista = NewCompoundView( xTransaccion, "IMPUESTORETENCION", xTransaccion.Workspace, nothing, false )
+	xVista.addfilter( NewFilterSpec( xvista.columnfrompath("CODIGO_IMPUESTO"), "=", xImpuesto.bo_owner.codigo ))
+	xVista.addjoin( NewJoinSpec( xVista.columnfrompath("TRANSACCION"), NewColumnSpec( "tregresovalores", "id", "" ), false ))
+	xVista.addjoin( NewJoinSpec( NewColumnSpec( "tregresovalores", "flag", "" ), NewColumnSpec( "flag", "id", "" ), true ))
+	''xVista.addfilter(NewFilterSpec( NewColumnSpec( "tregresovalores", "id", "" ),"=",xTransaccion.id))
+	xVista.addfilter(NewFilterSpec( NewColumnSpec( "tregresovalores", "estado", "" ),"=","C"))
+	xVista.addfilter(NewFilterSpec( xVista.columnfrompath("[TREGRESOVALORES]transaccion.[TREXTENSION]trextension.reversion"), "=", false))
+	if NOT xTransaccion.trextension.esquemaoperativo is nothing then
+		xVista.addfilter(NewFilterSpec( xVista.columnfrompath("[TREGRESOVALORES]transaccion.[TREXTENSION]trextension.esquemaoperativo"), "=", xTransaccion.trextension.esquemaoperativo.id))
+	end if
+	
+	set xFilter = NewFilterSpec(NewColumnSpec( "flag", "descripcion", "" ),"not like","%nulad%")
+	xFilter.beginblock = "("
+	xVista.addFilter(xFilter)
+	set xFilter = NewBlanckFilterSpec( NewColumnSpec( "tregresovalores", "flag", "" ), xTransaccion.Workspace, true )
+	xFilter.endblock = ")"
+	xFilter.conector = "or"
+	xVista.addFilter(xFilter)
+	
+	xVista.addfilter(NewFilterspec(NewColumnSpec( "tregresovalores", "destinatario", "" ),"=",xTransaccion.destinatario.id))
+	' senddebug xvista.sqltext
+	
+	if xImpuesto.acumulado.codigo = "01" then
+		'Mensual
+		DiaComienzo = dateadd("d",-day(xtransaccion.fechaactual)+1,xtransaccion.fechaactual)
+		xVista.addfilter(NewFilterSpec( NewColumnSpec( "tregresovalores", "fechaactual", "" ), ">=", DiaComienzo ))
+		xVista.addfilter(NewFilterSpec( NewColumnSpec( "tregresovalores", "fechaactual", "" ), "<=", xTransaccion.fechaactual ))   
+	elseif xImpuesto.acumulado.codigo = "02" then
+		'Anual
+		DiaComienzo = cdate("01-01-" & year(xtransaccion.fechaactual))
+		xVista.addfilter(NewFilterSpec( NewColumnSpec( "tregresovalores", "fechaactual", "" ), ">=", DiaComienzo ))
+		xVista.addfilter(NewFilterSpec( NewColumnSpec( "tregresovalores", "fechaactual", "" ), "<=", xTransaccion.fechaactual ))
+	end if	
+	''Ordenamos y agarramos UNICAMENTE el primer resultado, que es el ultimo acumulado
+	xVista.addordercolumn( NewOrderSpec( NewColumnSpec( "tregresovalores", "momento", "" ), true ))
+	for each xItemv in xVista.viewitems
+		set xitem = xitemv.bo
+		acumulado = acumulado + xItem.neto_acumulado
+		exit for
+	next
+	getAcumulado = acumulado
+	call addLogImpuesto(vbTab & vbTab & "Acumulado de retenciones anteriores: " & acumulado & " Tipo de Acumulado: " & xTipoAcumulado & " Fechas: Desde: " & DiaComienzo & " hasta " & xTransaccion.fechaactual )
+end function
+
+private function getRetenido(xImpuesto,xTransaccion,xConfiguracion)
+	getRetenido = 0
+	set xVista =  NewCompoundView (xTransaccion,"IMPUESTORETENCION",xTransaccion.workspace,nothing,false)
+	xVista.AddFilter(NewFilterspec(xVista.columnfrompath("CODIGO_IMPUESTO"),"=",xImpuesto.codigo))
+	xVista.AddFilter(NewFilterSpec(xVista.columnfrompath("[TREGRESOVALORES]transaccion.ESTADO"),"=","C"))
+	xVista.addfilter(NewFilterSpec(xVista.columnfrompath("[TREGRESOVALORES]transaccion.[TREXTENSION]trextension.reversion"), "=", false))
+	xVista.AddFilter(NewFilterSpec(xVista.columnfrompath("[TREGRESOVALORES]transaccion.[TREXTENSION]trextension.esquemaoperativo"),"=",xTransaccion.trextension.esquemaoperativo))
+	xVista.AddFilter(NewFilterSpec(xVista.columnfrompath("[TREGRESOVALORES]transaccion.destinatario"),"=",xTransaccion.destinatario))
+	
+	set xFilter = NewFilterSpec(xVista.columnfrompath("[TREGRESOVALORES]TRANSACCION.[FLAG]FLAG.DESCRIPCION"), "not like","%nulad%")
+	xFilter.beginblock = "("
+	xVista.addFilter(xFilter)
+	set xFilter = NewBlanckFilterSpec(xVista.columnfrompath("[TREGRESOVALORES]TRANSACCION.FLAG"), xTransaccion.Workspace, true )
+	xFilter.endblock = ")"
+	xFilter.conector = "or"
+	xVista.addFilter(xFilter)
+
+	if NOT xConfiguracion.acumulado is nothing then
+		if xConfiguracion.acumulado.codigo = "01" then
+			DiaComienzo = dateadd("d",-day(xtransaccion.fechaactual)+1,xtransaccion.fechaactual)
+		else
+			DiaComienzo = cdate("01-01-" & year(xtransaccion.fechaactual))
+		end if
+		xVista.AddFilter(NewFilterSpec(xVista.columnfrompath("[TREGRESOVALORES]TRANSACCION.FECHAACTUAL"),">",DiaComienzo))
+		xVista.AddFilter(NewFilterSpec(xVista.columnfrompath("[TREGRESOVALORES]TRANSACCION.FECHAACTUAL"),"<=",xtransaccion.fechaactual))
+		xVista.addordercolumn(neworderspec(xvista.columnFromPath("[TREGRESOVALORES]TRANSACCION.FECHAULTIMOESTADO"), true))
+		' senddebug "Ya retenido: " & xvista.sqltext
+		for each xItem in xVista.viewItems
+			getRetenido = xItem.bo.retencion_total
+			call addLogImpuesto(vbTab & vbTab & "El retenido anteriormente es por " & getRetenido)
+			exit for
+		next
+	else     	
+		getRetenido = 0
+	end if		
+end function
+
+private function BuscarCoeficiente(xImpuesto,acumulado,xTransaccion,xEntidad,MinimoNoImponible)
+	Coeficiente = 0
+	set xConfiguracion = xImpuesto.boextension
+	xTipoCoeficiente = ""
+	xDetallePadron = ""
+	if NOT xConfiguracion.tablaimpositiva is nothing then
+		xTipoCoeficiente = "TABLA IMPOSITIVA: " & xConfiguracion.tablaimpositiva.nombre
+		set xTabla = NewCompoundView( xTransaccion, "UD_VALORESTABLAIMPOSITIVA", xTransaccion.Workspace, xConfiguracion.tablaimpositiva.valores, false )
+		xtabla.addfilter(NewFilterSpec( xTabla.columnfrompath("MENORA"), ">=", acumulado - MinimoNoImponible ))
+		xtabla.addfilter(NewFilterSpec( xTabla.columnfrompath("MAYORA"), "<=", acumulado - MinimoNoImponible ))
+		if NOT xtabla.viewitems.isempty then 'elementosEnVista(xTabla) <> 0  then 
+			Coeficiente = (xtabla.viewitems.first.current.bo).porcentaje
+		end if
+	elseif elementosenLista(xConfiguracion.padrones) <> 0 then
+		xTipoCoeficiente = "PADRONES"
+		
+		set xPosicion = GetPosicionImpuesto( xEntidad, xImpuesto.nombre )	 	
+		if NOT xPosicion is nothing then
+			Coeficiente = xposicion.posicionimpuesto.coeficientedefault
+		else
+			Coeficiente = 0
+		end if
+		encontrado = false
+		''Vemos si esta en los padrones, de ser asi, tomamos el valor de estos ultimos
+		set xVista = NewCompoundView( xTransaccion, "UD_PADRON", xTransaccion.Workspace, xConfiguracion.padrones, false )
+		xVista.addordercolumn( NewOrderSpec( xVista.columnfrompath("ORDEN"), false ))
+		aVFecha = right("0" & cstr(day(xTransaccion.FechaActual)),2) & right("0" & cstr(month(xTransaccion.FechaActual)),2) & year(xTransaccion.FechaActual)
+		cuit = replace(xEntidad.enteasociado.cuit,"-","")
+		set xPadron = nothing
+		for each xPadronV in xVista.viewitems
+			set xPadron = xPadronv.bo
+			if xDetallePadron <> "" then xDetallePadron = xDetallePadron & vbCrlf
+			if NOT xPadron.tipo is nothing then 
+				esonline = false
+				if NOT xPadron.attributes("ONLINE") is nothing then
+					esonline = xPadron.online
+				else
+					esonline = xPadron.esonline
+				end if
+				xDetallePadron = vbTab & vbTab & vbTab & "Nombre: " & xPadron.nombre & "; EsOnline: " & esonline & "; Tipo Busqueda: " & xPadron.tipo.codigo & " - " & xPadron.tipo.nombre & ";"
+				if esonline then
+					fecha = xTransaccion.fechaactual
+					if Ucase(xPadron.nombre) = "PADRONTC" or Ucase(xPadron.nombre) = "PADRONTC_COEFICIENTE" Then
+						' REGLAS DE CALCULO				
+						' 1- BUSCAR EN PADRON "COEFICIENTES"  CONDICIONES
+							' 1- BUSCAR CUIT EN EL PADRON "COEFICIENTES" , 
+								' > CUANDO EL COEFICIENTE SEA != 0,0000 (COLUMNA C) 
+								' + CALCULO (COEFICIENTE * (PORCENTAJE/100) * 0,5) 			
+							' 2- BUSCAR CUIT EN PADRON "COEFICIENTES", CUANDO EL 
+								' > CUANDO COEFICIENTE SEA = 0,0000 
+								' + CALCULO TOMAR EL PORCENTAJE DEL PADRON COEFICIENTE QUE ES DEL 0,25%			
+							' 3- BUSCAR CUIT EN PADRON "COEFIENTES", 
+								' > CUANDO EL COEFICIENTE y PORCENTAJE SEA NULA (---,---) 
+								' + CALCULO DEVOLVER TASA 0.			
+						' 2- SI EL CUIT NO ES ENCONTRADO EN EL PADRON "COEFICIENTES", BUSCARLO EN EL PADRON "CONTRIBUYENTES"				
+							' 2.1- EVALUAR COLUMNA C: 			
+								' A: SI ES CL DEVOLVER PORCENTAJE DEL PADRON "CONTRIBUYENTES" 		
+								' B: SI ES CM HACER CALCULO (PORCENTAJE*0,5)		
+						' - padrontc: enviar "tipocontribuyente" en alícuota para obtener si es CM o CL.
+						' - padrontc_coeficiente: enviar "coeficiente" en alícuota para obtener el dato.
+						xCoefCoef  = cdbl2(coeficienteWebService("padrontc_coeficiente", cuit, "coeficiente", fecha))
+						xPorcCoef  = cdbl2(coeficienteWebService("padrontc_coeficiente", cuit, "porcentaje", fecha))
+						if xPorcCoef > 0 and xCoefCoef > 0 then '> CUANDO EL COEFICIENTE SEA != 0,0000 (COLUMNA C)
+							' xCoeficienteOnline = (xCoefCoef * (xPorcCoef/100) * 0.5) 
+							xCoeficienteOnline = (xCoefCoef * xPorcCoef * 0.5)
+							xDetallePadron = xDetallePadron & " Calculo Tucuman >> Padron: padrontc_coeficiente Regla: 1- BUSCAR CUIT EN EL PADRON 'COEFICIENTES', > CUANDO EL COEFICIENTE SEA != 0,0000 (COLUMNA C) *** CALCULO (COEFICIENTE * (PORCENTAJE/100) * 0,5)"  
+						elseif xCoefCoef = 0 and xPorcCoef > 0 then ' > CUANDO COEFICIENTE SEA = 0,0000
+							xCoeficienteOnline = xPorcCoef 
+							xDetallePadron = xDetallePadron & " Calculo Tucuman >> Padron: padrontc_coeficiente Regla: 2- BUSCAR CUIT EN PADRON 'COEFICIENTES', CUANDO EL > CUANDO COEFICIENTE SEA = 0,0000 *** CALCULO TOMAR EL PORCENTAJE DEL PADRON COEFICIENTE QUE ES DEL 0,25%	 "
+						elseif xPorcCoef = -2 and xCoefCoef = -2 then ' CUANDO EL COEFICIENTE y PORCENTAJE SEA NULA (---,---) 
+							xCoeficienteOnline = 0 
+							xDetallePadron = xDetallePadron & " Calculo Tucuman >> Padron: padrontc_coeficiente Regla: 3- BUSCAR CUIT EN PADRON 'COEFIENTES', > CUANDO EL COEFICIENTE y PORCENTAJE SEA NULA (---,---) *** CALCULO DEVOLVER TASA 0. "
+						else
+							xTipoContri = coeficienteWebService("padrontc", cuit, "tipocontribuyente", fecha)
+							xPorcContri = cdbl2(coeficienteWebService("padrontc", cuit, "porcentaje", fecha))
+							if xTipoContri = "CL" then 
+								xCoeficienteOnline = xPorcContri
+								xDetallePadron = xDetallePadron & " Calculo Tucuman >> Padron: padrontc Regla: 2.1- A: SI ES CL DEVOLVER PORCENTAJE DEL PADRON 'CONTRIBUYENTES' "
+							elseif xTipoContri = "CM" then  
+								xCoeficienteOnline = xPorcContri * 0.5
+								xDetallePadron = xDetallePadron & " Calculo Tucuman >> Padron: padrontc Regla: 2.2- B: SI ES CM HACER CALCULO (PORCENTAJE*0,5)"
+							elseif xPorcContri = -1 then 
+								xCoeficienteOnline = -1
+							end if 
+						end if 
+						' xCoeficienteOnline  = cdbl2(coeficienteWebService(xPadron.nombre, cuit, "porcentaje", fecha))
+						' if xCoeficienteOnline  > 0 then 
+							' xPadron2  = cdbl2(coeficienteWebService("padrontc_coeficiente", cuit, "porcentaje", fecha))
+							' if xPadron2 = 0.25 then 
+								' xCoeficienteOnline = xPadron2
+							' end if
+						' end if 
+					else
+						select case Ucase(Replace(xPadron.nombre, " ", ""))
+							case "PADRON_MENDOZA":	xNombreAlicuota = "alicuota"
+							case "PADRON_CORDOBA_PER":xNombreAlicuota = "alicuota"
+							case "PADRON_CORDOBA_RET":xNombreAlicuota = "alicuota"
+							case "PADRONJJ"	:		xNombreAlicuota = "alicuotaretencion"
+							case else	:			xNombreAlicuota = "alicuotaretencion"
+						end select
+						xCoeficienteOnline  = cdbl2(coeficienteWebService(xPadron.nombre, cuit, xNombreAlicuota, fecha))
+					end if 
+					if xCoeficienteOnline  <> -1 then
+						encontrado = true
+						' xCoeficienteOnline = replace(xCoeficienteOnline,",",".")
+						Coeficiente = xCoeficienteOnline 'cdbl(replace(xCoeficienteOnline,".", decimalseparator()))
+					end if
+				else
+					' if fComprobarExistenciaTabla( xTransaccion, xPadron.nombre , 1 ) then
+						'senddebug xPadron.nombre					
+						set xQuery = SelectSQL( "SELECT * FROM " & xPadron.nombre & " WHERE CUIT = '" & cuit & "' AND SUBSTRING(FECHAVIGENCIADESDE, 3,2) = '" & right("0" & cstr(month(xTransaccion.FechaActual)),2) & "'" , xTransaccion.WorkSpace )
+						for each xItem in xQuery				
+							xVar = xItem.Attributes("alicuotaretencion").AsVariant
+							xVar = replace(xvar,",",".")
+							Coeficiente = cdbl(replace(xVar,".", decimalseparator()))
+							encontrado = true
+						next
+					' end if
+				end if
+				xDetallePadron = xDetallePadron & " Encontrado:" & encontrado
+				if encontrado  then
+					exit for
+				end if 
+			Else
+				xDetallePadron = vbTab & vbTab & vbTab & "PADRON SIN TIPO: " & xPadron.nombre 
+			end if 
+		next   
+		if NOT xPadron is nothing then 'entro a al menos un padron y analizo el ultimo que tipo tiene '
+			if NOT xPadron.Tipo is nothing then
+				if xPadron.tipo.codigo = "01" and encontrado = false then 'Solo mira padron'
+					Coeficiente = 0
+				end if 
+			end if
+		end if 
+	else
+		xTipoCoeficiente = "DEFAULT"
+		set xPosicion = GetPosicionImpuesto( xEntidad, xImpuesto.nombre )
+		if NOT xPosicion is nothing then
+			Coeficiente = xposicion.posicionimpuesto.coeficientedefault
+		else
+			Coeficiente = 0
+		end if
+	end if	
+	''Buscamos las exenciones
+	xExencionEncon = ""
+	ValorExencion = buscaExenciones(xEntidad,xImpuesto.boextension.familia,xTransaccion)
+	if ValorExencion > 0 then
+		Coeficiente = Coeficiente - ((Coeficiente*ValorExencion)/100)
+		xExencionEncon = vbTab & vbTab & "Excencion Encontrada: " &  ValorExencion & "%"
+	end if
+	
+	addLogImpuesto(vbTab & vbTab & "Tipo de Busqueda de coeficiente: " & xTipoCoeficiente) 
+	if xDetallePadron <> "" then addLogImpuesto(xDetallePadron)
+	if xExencionEncon <> "" then addLogImpuesto(xExencionEncon)
+	addLogImpuesto(vbTab & vbTab & "El coeficiente a aplicar es por " & Coeficiente & "%")
+	
+	BuscarCoeficiente = Coeficiente
+end function
+
+function elementosEnLista(xLista)
+	elementos = 0
+	for each xItem in xLista
+		elementos = elementos + 1
+		exit for 
+	next
+	elementosEnLista = elementos
+end function
+
+private function elementosEnVista(xVista)
+	set xconsulta    = SelectSQL( xvista.sqltext,xvista.WorkSpace )
+	elementosEnVista = xconsulta.count
+end function
+
+private function getOrdenPago(xTransaccion)			
+	set aDevolver = xTransaccion.generadapor.transaccionesorigen.first.current
+	set getOrdenPago = adevolver
+end function
+
+private function MinimoTabla(xImpuesto,acumulado,xTransaccion)
+	Minimo = 0
+	set xConfiguracion = xImpuesto.boextension
+	if NOT xConfiguracion.tablaimpositiva is nothing then
+		set xTabla = NewCompoundView( xTransaccion, "UD_VALORESTABLAIMPOSITIVA", xTransaccion.Workspace, xConfiguracion.tablaimpositiva.valores, false )
+		xtabla.addfilter(NewFilterSpec( xTabla.columnfrompath("MENORA"), ">=", acumulado ))
+		xtabla.addfilter(NewFilterSpec( xTabla.columnfrompath("MAYORA"), "<=", acumulado ))
+		if NOT xtabla.viewitems.isempty then 'elementosEnVista(xTabla) <> 0'
+			Minimo = (xtabla.viewitems.first.current.bo).mayora
+			call addLogImpuesto("El minimo de tabla correspondiente es por " & Minimo)
+		end if
+	end if	
+	MinimoTabla = Minimo
+end function
+
+private function ValorTabla(xImpuesto,acumulado,xTransaccion)
+	aSumar = 0
+	set xConfiguracion = xImpuesto.boextension
+	if NOT xConfiguracion.tablaimpositiva is nothing then
+		set xTabla = NewCompoundView( xTransaccion, "UD_VALORESTABLAIMPOSITIVA", xTransaccion.Workspace, xConfiguracion.tablaimpositiva.valores, false )
+		xtabla.addfilter(NewFilterSpec( xTabla.columnfrompath("MENORA"), ">=", acumulado ))
+		xtabla.addfilter(NewFilterSpec( xTabla.columnfrompath("MAYORA"), "<=", acumulado ))
+		if NOT xtabla.viewitems.isempty then 'elementosEnVista(xTabla) <> 0  then
+			aSumar = (xtabla.viewitems.first.current.bo).valorasumar
+		end if
+		call addLogImpuesto("El valor a sumar por tabla es por " & aSumar)
+	end if	
+	ValorTabla = aSumar
+end function
+
+private function buscaExenciones(xProveedor,xFamilia,xTransaccion)
+	devolucion = 0
+	if classname(xProveedor) = "PROVEEDOR" then
+		set xVista = NewCompoundView( xTransaccion, "UD_EXENCION", xTransaccion.Workspace, xProveedor.boextension.exenciones, false )
+		xVista.addfilter(NewFilterSpec( xVista.columnfrompath("FAMILIA"), "=", xFamilia ))
+		xVista.addfilter(NewFilterSpec( xVista.columnfrompath("FECHADESDE"), "<=", xtransaccion.fechaactual ))
+		xVista.addfilter(NewFilterSpec( xVista.columnfrompath("FECHAHASTA"), ">=", xtransaccion.fechaactual ))
+		for each xItemv in xVista.viewitems
+			devolucion = xItemv.bo.porcentaje
+		next
+	end if
+	buscaExenciones = devolucion
+end function
+
+private function calculaTotalImpuestosDelItem(xListaImpuestosCalculables,xItem)
+	total = 0
+	''Nos fijamos en los totalizadores
+	for each xImpuesto in xListaImpuestosCalculables						
+		for each xImp in xitem.impuestositemtransaccion
+			if xImp.definicionimpuesto.impuesto.id = xImpuesto.id then 
+				total = total + xImp.valor.importe
+			end if 
+		next
+	next
+	calculaTotalImpuestosDelItem = total
+end function
+
+private function calculaTotalImpuestos(xListaImpuestosCalculables,xTransaccion)
+	total = 0
+	''Nos fijamos en los totalizadores
+	for each xTotalImpuesto in xTransaccion.totales
+		for each xImpuesto in xListaImpuestosCalculables
+			if xTotalImpuesto.referencia.id = xImpuesto.id then
+			   total = total + xTotalImpuesto.valor.importe 
+			   exit for
+			end if
+		next
+	next
+	calculaTotalImpuestos = total
+end function
+
+private function addLogImpuesto(aLogNuevo)
+	senddebug aLogNuevo
+	if aLogImpuesto = "" then
+	   aLogImpuesto = aLogNuevo
+	else
+	   aLogImpuesto = aLogImpuesto & chr(13) & chr(10) & aLogNuevo
+	end if
+end function
+
+private function resetLogImpuesto()
+	aLogImpuesto = ""
+end function
+
+private function coeficienteWebService(nombrePadron, cuit, campo, fecha)	
+	xUrl = "https://uuwd2aobf0.execute-api.us-east-1.amazonaws.com/fase1/padrones?nombre=:NOMBREPADRON&cuit=:CUIT&alicuota=:CAMPO&fecha=:FECHA"
+	xUrl = replace(xUrl, ":NOMBREPADRON", nombrePadron)
+	xUrl = replace(xUrl, ":CUIT", cuit)
+	xUrl = replace(xUrl, ":CAMPO", campo)
+	xUrl = replace(xUrl, ":FECHA", convertirFechaWebService(fecha))
+	Set o = CreateObject("MSXML2.XMLHTTP")
+	o.open "GET", xUrl, False
+	o.send
+	coeficienteWebService = o.responseText
+	separadordecimal = ObtenerSeparadorDecimal()
+	coeficienteWebService = replace(coeficienteWebService, ",", separadordecimal)
+	if coeficienteWebService  = "-----" then 
+		coeficienteWebService = -2 
+		exit function 
+	elseif coeficienteWebService = "CL" or coeficienteWebService = "CM" then 
+		exit function
+	end if 
+	if isNumeric(coeficienteWebService) then  
+		coeficienteWebService = cdbl2(coeficienteWebService)
+	else
+		coeficienteWebService = -1
+	end if
+end function
+
+private function ObtenerSeparadorDecimal()
+	resultado = cstr(15/7)
+	if instr(resultado,".") <> 0 then
+	 ObtenerSeparadorDecimal = "."
+	else
+	 ObtenerSeparadorDecimal = ","
+	end if
+end function
+
+private function convertirFechaWebService(xFecha)
+	anio = year(xFecha)
+	mes = right("0" & cstr(month(xfecha)),2) 
+	dia = right("0" & cstr(day(xfecha)),2) 
+	convertirFechaWebService = anio & "-" & mes & "-" & dia
+end function
+
+private Function cdbl2(xValor)
+	xNewResul = replace(xValor,",",".")
+	xNewResul = cdbl(replace(xNewResul,".", xSeparadorDecimal))
+	if isNumeric(xNewResul) then 
+		cdbl2 = cdbl(xNewResul)
+	else
+		cdbl2 = -1
+	end if 
+end function
+'Fin
+
+FINSCRIPT
