@@ -48,8 +48,8 @@ if(xConfigurador != null){
 			//self.sendDebug("Excel" + query)
 			//var excel = getExcel(nombreConfigurador, xConfigurador, camposConfigurador, xParametrosConfigurador, query)
 			//var hoja = agregarHoja(xConfigurador, camposConfigurador, xParametrosConfigurador, query)
-			var excel = getExcel(nombreConfigurador);
-			var hoja = agregarHoja(excel, xConfigurador, camposConfigurador, xParametrosConfigurador, query);
+			var excel = getExcel(nombreConfigurador)
+			var hoja = agregarHoja(excel, xConfigurador, camposConfigurador, xParametrosConfigurador, query)
 			excel.sheets.push(hoja)
 			
 			while (xConfigurador.nuevahoja_id != null) {
