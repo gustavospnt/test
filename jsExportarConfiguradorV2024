@@ -254,68 +254,81 @@ function escribirTitulos(xHoja, xCampos, row){
 	return row
 }
 
-function escribirContenido(xHoja, xConfigurador, xCampos, xParametrosConfigurador, query, row){
+function escribirContenido(excel, xHoja, xConfigurador, xCampos, xParametrosConfigurador, query, row, maxFilasPorHoja = 10000, maxFilasGlobal = 30000) {
     var col = 0;
     var resultadoQuery = JSON.parse(self.getQueryResult(query));
     var xDicTotales = getDicTotales(xCampos);
     var xHayCorteControl = HayCorteControl(xCampos);
     var xDicCorteControl = getDicTotales(xCampos);
-    var xCorteAnterior = ""; 
+    var xCorteAnterior = "";
     var xCorteControlActual = "";
     var filasProcesadas = 0;
-    var cadaCuantasFilas = 1000; // Ajusta este valor según tus necesidades
+    var hojaActual = xHoja;
+    var hojaIndex = 1;
 
-    for(var xResultadoN = 0; xResultadoN < resultadoQuery.results.length; xResultadoN++){   
+    for (var xResultadoN = 0; xResultadoN < resultadoQuery.results.length; xResultadoN++) {
+        // Cortar si llegamos al máximo global
+        if (filasProcesadas >= maxFilasGlobal) {
+            break;
+        }
+        // Nueva hoja cada maxFilasPorHoja filas
+        if (filasProcesadas > 0 && filasProcesadas % maxFilasPorHoja === 0) {
+            hojaIndex++;
+            // Crear nueva hoja
+            hojaActual = {};
+            hojaActual.cells = [];
+            hojaActual.name = xHoja.name + "_parte" + hojaIndex;
+            excel.sheets.push(hojaActual);
+            row = 0;
+            // Opcional: escribir títulos en la nueva hoja
+            row = escribirTitulos(hojaActual, xCampos, row);
+        }
+
         var xRow = resultadoQuery.results[xResultadoN];
         col = 0;
-        if (xHayCorteControl){
+        if (xHayCorteControl) {
             xCorteControlActual = llenarVector(xRow, xCampos);
-            if (xCorteAnterior != xCorteControlActual && xCorteAnterior != ""){
-                agregartotales(xDicCorteControl, xCampos, xHoja, row, false);
+            if (xCorteAnterior != xCorteControlActual && xCorteAnterior != "") {
+                agregartotales(xDicCorteControl, xCampos, hojaActual, row, false);
                 xCorteAnterior = xCorteControlActual;
                 row = row + 1;
             }
         }
-        for(var xCamposN = 0; xCamposN < xCampos.results.length; xCamposN++){
+        for (var xCamposN = 0; xCamposN < xCampos.results.length; xCamposN++) {
             var xCampo = xCampos.results[xCamposN];
             var xValue = xRow[xCampo.nombresql.toLowerCase()];
-            switch(xCampo.tipodato.toLowerCase()) {
+            switch (xCampo.tipodato.toLowerCase()) {
                 case "float":
-                    agregarCeldaFloat(xHoja, row, col, xValue);
-                    if (xConfigurador.muestratotales == true){
-                        if ( xCampo.totaliza == true){
-                            xDicTotales =  registrarvalor(xDicTotales, xCampo.nombresql, xValue);
-                            if (xHayCorteControl == true){
+                    agregarCeldaFloat(hojaActual, row, col, xValue);
+                    if (xConfigurador.muestratotales == true) {
+                        if (xCampo.totaliza == true) {
+                            xDicTotales = registrarvalor(xDicTotales, xCampo.nombresql, xValue);
+                            if (xHayCorteControl == true) {
                                 xDicCorteControl = registrarvalor(xDicCorteControl, xCampo.nombresql, xValue);
                             }
                         }
                     }
                     break;
                 case "date":
-                    agregarCelda(xHoja, row, col, self.stringToFWDate(xValue));
+                    agregarCelda(hojaActual, row, col, self.stringToFWDate(xValue));
                     break;
                 default:
-                    agregarCelda(xHoja, row, col, xValue);
+                    agregarCelda(hojaActual, row, col, xValue);
             }
             col = col + 1;
         }
         xCorteAnterior = xCorteControlActual;
         row = row + 1;
-
         filasProcesadas++;
-        if (filasProcesadas % cadaCuantasFilas === 0) {
-            self.sendDebug(`Procesadas ${filasProcesadas} filas en escribirContenido...`);
-        }
     }
-    if (xHayCorteControl){
-        agregartotales(xDicCorteControl, xCampos, xHoja, row, false);
+    if (xHayCorteControl) {
+        agregartotales(xDicCorteControl, xCampos, hojaActual, row, false);
         row = row + 1;
     }
-    if (xConfigurador.muestratotales == true && row > 1 ){
-        agregartotales(xDicTotales, xCampos, xHoja, row, true);
+    if (xConfigurador.muestratotales == true && row > 1) {
+        agregartotales(xDicTotales, xCampos, hojaActual, row, true);
     }
 }
-
 
 function llenarVector(xRow, xCampos){
 	var resultado = ""
