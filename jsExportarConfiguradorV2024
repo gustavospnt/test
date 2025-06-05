@@ -46,8 +46,10 @@ if(xConfigurador != null){
 			
 		}else{
 			//self.sendDebug("Excel" + query)
-			var excel = getExcel(nombreConfigurador, xConfigurador, camposConfigurador, xParametrosConfigurador, query)
-			var hoja = agregarHoja(xConfigurador, camposConfigurador, xParametrosConfigurador, query)
+			//var excel = getExcel(nombreConfigurador, xConfigurador, camposConfigurador, xParametrosConfigurador, query)
+			//var hoja = agregarHoja(xConfigurador, camposConfigurador, xParametrosConfigurador, query)
+			var excel = getExcel(nombreConfigurador);
+			var hoja = agregarHoja(excel, xConfigurador, camposConfigurador, xParametrosConfigurador, query);
 			excel.sheets.push(hoja)
 			
 			while (xConfigurador.nuevahoja_id != null) {
@@ -161,16 +163,17 @@ function getExcel(nombreConfigurador){
     return excel;
 }
 
-function agregarHoja(xConfigurador, xCampos, xParametrosConfigurador, query){
-	 var hoja = {};
+function agregarHoja(excel, xConfigurador, xCampos, xParametrosConfigurador, query) {
+    var hoja = {};
     hoja.cells = [];
-    hoja.name = xConfigurador.nombre
-	var row = 0 
-	row = escribirParametros(hoja, xParametrosConfigurador, row)
-	row = row + 1
+    hoja.name = xConfigurador.nombre;
+    var row = 0;
+    row = escribirParametros(hoja, xParametrosConfigurador, row);
+    row = row + 1;
     row = escribirTitulos(hoja, xCampos, row);
-    escribirContenido(hoja, xConfigurador, xCampos, xParametrosConfigurador, query, row);
-	return hoja;
+    // Pasa el objeto excel para poder agregar más hojas si es necesario
+    escribirContenido(excel, hoja, xConfigurador, xCampos, xParametrosConfigurador, query, row);
+    return hoja;
 }
 
 
@@ -254,7 +257,7 @@ function escribirTitulos(xHoja, xCampos, row){
 	return row
 }
 
-function escribirContenido(excel, xHoja, xConfigurador, xCampos, xParametrosConfigurador, query, row, maxFilasPorHoja = 10000, maxFilasGlobal = 30000) {
+function escribirContenido(excel, xHoja, xConfigurador, xCampos, xParametrosConfigurador, query, row, maxFilasPorHoja = 20000, maxFilasGlobal = 60000) {
     var col = 0;
     var resultadoQuery = JSON.parse(self.getQueryResult(query));
     var xDicTotales = getDicTotales(xCampos);
@@ -265,6 +268,8 @@ function escribirContenido(excel, xHoja, xConfigurador, xCampos, xParametrosConf
     var filasProcesadas = 0;
     var hojaActual = xHoja;
     var hojaIndex = 1;
+     var cadaCuantasFilas = 2000; // Ajusta este valor según tus necesidades
+
 
     for (var xResultadoN = 0; xResultadoN < resultadoQuery.results.length; xResultadoN++) {
         // Cortar si llegamos al máximo global
@@ -320,6 +325,10 @@ function escribirContenido(excel, xHoja, xConfigurador, xCampos, xParametrosConf
         xCorteAnterior = xCorteControlActual;
         row = row + 1;
         filasProcesadas++;
+	 if (filasProcesadas % cadaCuantasFilas === 0) {
+              self.sendDebug("Procesadas " + filasProcesadas + " filas en escribirContenido...");
+        }
+
     }
     if (xHayCorteControl) {
         agregartotales(xDicCorteControl, xCampos, hojaActual, row, false);
