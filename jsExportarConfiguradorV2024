@@ -256,63 +256,66 @@ function escribirTitulos(xHoja, xCampos, row){
 
 function escribirContenido(xHoja, xConfigurador, xCampos, xParametrosConfigurador, query, row){
     var col = 0;
-    self.sendDebug("Inicio de titupos")
-    // var row = 1;
-    //var query = xConfigurador.query;
     var resultadoQuery = JSON.parse(self.getQueryResult(query));
-	var xDicTotales = getDicTotales(xCampos)
-	var xHayCorteControl = HayCorteControl(xCampos)
-	var xDicCorteControl = getDicTotales(xCampos)
-	var xCorteAnterior = "" 
-	var xCorteControlActual = ""
-    for(var xResultadoN in resultadoQuery.results){   
-		var xRow = resultadoQuery.results[xResultadoN];
-		col = 0;
-		if (xHayCorteControl == true){
-			xCorteControlActual = llenarVector(xRow, xCampos)
-			if (xCorteAnterior != xCorteControlActual && xCorteAnterior !="" ){
-				agregartotales(xDicCorteControl, xCampos, xHoja, row, false)
-				xCorteAnterior = xCorteControlActual
-				row = row + 1;
-			}
-		}
-		for(var xCamposN in xCampos.results){
-			var xCampo = xCampos.results[xCamposN];
-			var xValue = xRow[xCampo.nombresql.toLowerCase()]
-			switch(xCampo.tipodato.toLowerCase()) {
-				case "float":
-					//xNuevo = FormatearNumero(xNuevo, xCampo.cantidaddecimales)
-					agregarCeldaFloat(xHoja, row, col, xValue)
-					if (xConfigurador.muestratotales == true){
-						if ( xCampo.totaliza == true){
-							xDicTotales =  registrarvalor(xDicTotales, xCampo.nombresql, xValue)
-							if (xHayCorteControl == true){
-								xDicCorteControl = registrarvalor(xDicCorteControl, xCampo.nombresql, xValue)
-							}
-						}
-					}
-					break;
-				case "date":
-					//xNuevo = self.stringToFWDate(xValorOri)
-					agregarCelda(xHoja, row, col, self.stringToFWDate(xValue)) 
-					break;
-				default:
-					agregarCelda(xHoja, row, col, xValue) 
-			}
-			col = col + 1;
-		}
-		
-		xCorteAnterior = xCorteControlActual 
-		row = row + 1;
+    var xDicTotales = getDicTotales(xCampos);
+    var xHayCorteControl = HayCorteControl(xCampos);
+    var xDicCorteControl = getDicTotales(xCampos);
+    var xCorteAnterior = ""; 
+    var xCorteControlActual = "";
+    var filasProcesadas = 0;
+    var cadaCuantasFilas = 1000; // Ajusta este valor según tus necesidades
+
+    for(var xResultadoN = 0; xResultadoN < resultadoQuery.results.length; xResultadoN++){   
+        var xRow = resultadoQuery.results[xResultadoN];
+        col = 0;
+        if (xHayCorteControl){
+            xCorteControlActual = llenarVector(xRow, xCampos);
+            if (xCorteAnterior != xCorteControlActual && xCorteAnterior != ""){
+                agregartotales(xDicCorteControl, xCampos, xHoja, row, false);
+                xCorteAnterior = xCorteControlActual;
+                row = row + 1;
+            }
+        }
+        for(var xCamposN = 0; xCamposN < xCampos.results.length; xCamposN++){
+            var xCampo = xCampos.results[xCamposN];
+            var xValue = xRow[xCampo.nombresql.toLowerCase()];
+            switch(xCampo.tipodato.toLowerCase()) {
+                case "float":
+                    agregarCeldaFloat(xHoja, row, col, xValue);
+                    if (xConfigurador.muestratotales == true){
+                        if ( xCampo.totaliza == true){
+                            xDicTotales =  registrarvalor(xDicTotales, xCampo.nombresql, xValue);
+                            if (xHayCorteControl == true){
+                                xDicCorteControl = registrarvalor(xDicCorteControl, xCampo.nombresql, xValue);
+                            }
+                        }
+                    }
+                    break;
+                case "date":
+                    agregarCelda(xHoja, row, col, self.stringToFWDate(xValue));
+                    break;
+                default:
+                    agregarCelda(xHoja, row, col, xValue);
+            }
+            col = col + 1;
+        }
+        xCorteAnterior = xCorteControlActual;
+        row = row + 1;
+
+        filasProcesadas++;
+        if (filasProcesadas % cadaCuantasFilas === 0) {
+            self.sendDebug(`Procesadas ${filasProcesadas} filas en escribirContenido...`);
+        }
     }
-	if (xHayCorteControl == true){
-		agregartotales(xDicCorteControl, xCampos, xHoja, row, false)
-		row = row + 1;
-	}
-	if (xConfigurador.muestratotales == true && row > 1 ){
-		agregartotales(xDicTotales, xCampos, xHoja, row, true)
-	}
+    if (xHayCorteControl){
+        agregartotales(xDicCorteControl, xCampos, xHoja, row, false);
+        row = row + 1;
+    }
+    if (xConfigurador.muestratotales == true && row > 1 ){
+        agregartotales(xDicTotales, xCampos, xHoja, row, true);
+    }
 }
+
 
 function llenarVector(xRow, xCampos){
 	var resultado = ""
