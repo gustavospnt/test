@@ -1,0 +1,543 @@
+
+// Creada por rcruz 03/01/2022
+// jsExportarConfiguradorV2024 copiada desde jsExportarConfiguradorV2022 porque al usarlo 2 veces solo muestra 1
+//Genera Un Excel desde Configurador de Excel 
+// 2023/01 se agrego para que el excel muestre los parametro
+
+var xMotorBD = "P" //P = PostgreSQL // S = MS SQL Server // O = Oracle
+var nombreConfigurador = self.getParameter('ACTIONID');
+var xConfigurador = getConfigurador(nombreConfigurador);
+var xFormato = self.getParameter('FORMATO')
+
+if(xConfigurador != null){
+	var camposConfigurador = getCamposConfigurador(nombreConfigurador);
+	var xParametrosConfigurador = getParametros(nombreConfigurador);
+	var query = xConfigurador.query;
+	query = InterpretarQuery(query, xMotorBD)
+    query = replaceParamsInQuery(query, xParametrosConfigurador);
+	//self.sendDebug(query)
+	if (query != ""){
+		if (xFormato == "csv" || xFormato == "txt" ){
+			var folder = {}
+			folder.name = nombreConfigurador
+			folder.files = []
+			
+			var xFile = generarFile(camposConfigurador, query, xMotorBD, nombreConfigurador, xFormato)
+			folder.files.push(xFile)
+			
+			while (xConfigurador.nuevahoja_id != null) {
+				var xConfigurador = getConfiguradorFromID(xConfigurador.nuevahoja_id);
+				if(xConfigurador != null){
+					nombreConfigurador = xConfigurador.nombre
+					var camposConfigurador = getCamposConfigurador(nombreConfigurador);
+					var xParametrosConfigurador = getParametros(nombreConfigurador);
+					var query = xConfigurador.query;
+					query = InterpretarQuery(query, xMotorBD)
+					query = replaceParamsInQuery(query, xParametrosConfigurador);
+
+					if (query != ""){
+						var xFile = generarFile(camposConfigurador, query, xMotorBD, nombreConfigurador, xFormato)
+						folder.files.push(xFile)
+					}
+				}
+			}
+			
+			self.addCompressZipReturn(JSON.stringify(folder))
+			
+		}else{
+			//self.sendDebug("Excel" + query)
+			var excel = getExcel(nombreConfigurador, xConfigurador, camposConfigurador, xParametrosConfigurador, query)
+			var hoja = agregarHoja(xConfigurador, camposConfigurador, xParametrosConfigurador, query)
+			excel.sheets.push(hoja)
+			
+			while (xConfigurador.nuevahoja_id != null) {
+				var xConfigurador = getConfiguradorFromID(xConfigurador.nuevahoja_id);
+				if(xConfigurador != null){
+					nombreConfigurador = xConfigurador.nombre
+					var camposConfigurador = getCamposConfigurador(nombreConfigurador);
+					var xParametrosConfigurador = getParametros(nombreConfigurador);
+					var query = xConfigurador.query;
+					query = InterpretarQuery(query, xMotorBD)
+					query = replaceParamsInQuery(query, xParametrosConfigurador);
+					if (query != ""){
+						var hoja = agregarHoja(xConfigurador, camposConfigurador, xParametrosConfigurador, query)
+						excel.sheets.push(hoja)
+					}
+				}
+			}
+						
+			self.addReturn('EXCEL', JSON.stringify(excel))
+		}
+		
+	}else{
+		self.addReturn('MENSAJE','No se encontro query en configurador ' + nombreConfigurador)
+	}
+}else{
+	self.addReturn('MENSAJE','CONFIGURADOR NO ENCONTRADO CON NOMBRE ' + nombreConfigurador)
+}
+
+function getConfigurador(aConfigurador){
+    var query = "SELECT * FROM UD_CONFIGURADOREXCEL WHERE NOMBRE = ':NOMBRE'";
+    query = query.replace(":NOMBRE", aConfigurador);
+    var xResult = JSON.parse(self.getQueryResult(query)).results[0];
+    return xResult;
+}
+
+function getConfiguradorFromID(idConfigurador){
+    var query = "SELECT * FROM UD_CONFIGURADOREXCEL WHERE ID = ':ID'";
+    query = query.replace(":ID", idConfigurador);
+    var xResult = JSON.parse(self.getQueryResult(query)).results[0];
+    return xResult;
+}
+
+function getCamposConfigurador(aConfigurador){
+    var query = "SELECT UDIT.* FROM UD_CONFIGURADOREXCEL CE JOIN V_UD_ITEMCONFIGURADOREXCEL UDIT ON UDIT.BO_PLACE_ID = CE.COLUMNAS_ID WHERE CE.NOMBRE = ':NOMBRE' ORDER BY UDIT.ORDEN";
+    query = query.replace(":NOMBRE", aConfigurador);
+    var xResult = JSON.parse(self.getQueryResult(query));
+    return xResult;
+}
+
+function getParametros(aConfigurador){
+    var query = "SELECT PARAM.* FROM UD_CONFIGURADOREXCEL CE JOIN UD_PARAMETROEXCEL PARAM ON PARAM.BO_PLACE_ID = CE.PARAMETROS_ID WHERE CE.NOMBRE = ':NOMBRE' ORDER BY PARAM.NOMBRE";
+    query = query.replace(":NOMBRE", aConfigurador);
+    var xResult = JSON.parse(self.getQueryResult(query));
+    for(var xParamN in xResult.results){
+        var xParam = xResult.results[xParamN];
+        var parametro = self.getParameter(xParam.nombre);
+        xParam.valor = parametro;
+    }
+    return xResult;
+}
+
+function replaceParamsInQuery(query, xParametrosConfigurador){
+    var resultado = query;
+    for(var xParamN in xParametrosConfigurador.results){
+        var xParam = xParametrosConfigurador.results[xParamN];
+		var paramtoreplace = ":" + xParam.nombreenquery;	
+		paramtoreplace = paramtoreplace.replace("::", ":");
+		switch(xParam.tipo) {
+			case "CADENAIDS":
+			    var IDs = xParam.valor
+			    if (IDs == null ){
+			        IDs = self.ID
+			    }
+				var variable = "'" + self.replaceInWholeString(IDs, ",", "','") + "'";
+				resultado = self.replaceInWholeString(resultado, paramtoreplace, variable);
+				break;
+			case "DATE":
+				var variable = "'" + self.replaceInWholeString(xParam.valor, "-", "") + "'";
+				resultado = self.replaceInWholeString(resultado, paramtoreplace, variable);
+				break;
+			default:
+				resultado = self.replaceInWholeString(resultado, paramtoreplace, "'" + xParam.valor + "'");
+		}
+		
+    }	
+    print(resultado);
+    return resultado;
+}
+
+function getNombreSQL(xCampo){
+	//xResult = "auxConf." + xCampo.nombresql
+	switch(xCampo.tipodato) {
+		case "Float":
+			if ( xCampo.cantidaddecimales > 0 ){
+				xResult = "Round(auxConf." + xCampo.nombresql + ", " + xCampo.cantidaddecimales + ") " 
+			}
+			break;
+		case "Date":
+			xResult = "SUBSTR(auxConf." + xCampo.nombresql + ", 7, 2) || '/' || SUBSTR(auxConf." + xCampo.nombresql + ", 5, 2)|| '/' || SUBSTR(auxConf." + xCampo.nombresql + ", 1, 4)  "
+			break;
+		default:
+			xResult = "Replace(auxConf." + xCampo.nombresql + ", ';' , '') " 
+	}
+	return xResult;
+}
+
+function getExcel(nombreConfigurador){
+    var excel = {};
+    excel.name = nombreConfigurador + ".xlsx"
+    excel.sheets = [];
+    return excel;
+}
+
+function agregarHoja(xConfigurador, xCampos, xParametrosConfigurador, query){
+	 var hoja = {};
+    hoja.cells = [];
+    hoja.name = xConfigurador.nombre
+	var row = 0 
+	row = escribirParametros(hoja, xParametrosConfigurador, row)
+	row = row + 1
+    row = escribirTitulos(hoja, xCampos, row);
+    escribirContenido(hoja, xConfigurador, xCampos, xParametrosConfigurador, query, row);
+	return hoja;
+}
+
+
+function escribirParametros(hoja, xParametrosConfigurador, row){
+    for(var xParamN in xParametrosConfigurador.results){
+        var xParam = xParametrosConfigurador.results[xParamN];
+		switch(xParam.tipo) {
+			case "CADENAIDS":
+			    var IDs = xParam.valor
+			    if (IDs == null ){
+			        IDs = self.ID
+			    }
+				var variable = "'" + self.replaceInWholeString(IDs, ",", "','") + "'";
+				agregarCelda(hoja, row, 0, GetNombreVariable(xParam.nombre))
+				agregarCelda(hoja, row, 1, GetParametroVariant(variable, xParam.tabla, xParam.campoamostrar))
+				break;
+			case "VARIANT":
+				var variable = "'" + xParam.valor + "'";				
+				agregarCelda(hoja, row, 0, GetNombreVariable(xParam.nombre))
+				agregarCelda(hoja, row, 1, GetParametroVariant(variable, xParam.tabla, xParam.campoamostrar))
+				break;
+			case "DATE":
+				var variable = self.replaceInWholeString(xParam.valor, "-", "");	
+				self.sendDebug(variable)
+				agregarCelda(hoja, row, 0, GetNombreVariable(xParam.nombre))
+				agregarCelda(hoja, row, 1, self.stringToFWDate(variable))
+				break;
+			default:
+				agregarCelda(hoja, row, 0, GetNombreVariable(xParam.nombre))
+				agregarCelda(hoja, row, 1, xParam.valor)
+		}
+		row = row + 1
+    }	
+    return row;
+    
+}
+
+function GetNombreVariable(xNombre){
+	switch(xNombre) {
+		case "ESQUEMA":
+		case "ESQUEMAOPERATIVO":
+			return "Esquema Operativo"
+			break;
+		case "FECHADESDE":
+		case "DESDEFECHA":
+			return "Fecha Desde:"
+			break;
+		case "FECHAHASTA":
+		case "HASTAFECHA":
+			return "Fecha Hasta:"
+			break;
+		default:
+			return xNombre
+	}	
+}
+
+function GetParametroVariant(xValue, xTabla, xCampo){
+	var xRetur = "Error recibiendo variable"
+	var query = "select " + xCampo + " resultados from " + xTabla + " where id in ( " + xValue + ")"
+	var resultadoQuery = JSON.parse(self.getQueryResult(query));
+    for(var xResultadoN in resultadoQuery.results){   
+		var xRow = resultadoQuery.results[xResultadoN];
+		xRetur = xRow.resultados
+	}
+	return xRetur
+}
+
+
+function escribirTitulos(xHoja, xCampos, row){
+    var col = 0;
+    for(var xCamposN in xCampos.results){
+        var xCampo = xCampos.results[xCamposN];
+        var cell = {};
+        cell.row = row;
+        cell.column = col;
+        col = col + 1;
+        cell.value = xCampo.titulo;
+        xHoja.cells.push(cell);
+    }
+	row = row + 1
+	return row
+}
+
+function escribirContenido(xHoja, xConfigurador, xCampos, xParametrosConfigurador, query, row){
+    var col = 0;
+    self.sendDebug("Inicio de titupos")
+    // var row = 1;
+    //var query = xConfigurador.query;
+    var resultadoQuery = JSON.parse(self.getQueryResult(query));
+	var xDicTotales = getDicTotales(xCampos)
+	var xHayCorteControl = HayCorteControl(xCampos)
+	var xDicCorteControl = getDicTotales(xCampos)
+	var xCorteAnterior = "" 
+	var xCorteControlActual = ""
+    for(var xResultadoN in resultadoQuery.results){   
+		var xRow = resultadoQuery.results[xResultadoN];
+		col = 0;
+		if (xHayCorteControl == true){
+			xCorteControlActual = llenarVector(xRow, xCampos)
+			if (xCorteAnterior != xCorteControlActual && xCorteAnterior !="" ){
+				agregartotales(xDicCorteControl, xCampos, xHoja, row, false)
+				xCorteAnterior = xCorteControlActual
+				row = row + 1;
+			}
+		}
+		for(var xCamposN in xCampos.results){
+			var xCampo = xCampos.results[xCamposN];
+			var xValue = xRow[xCampo.nombresql.toLowerCase()]
+			switch(xCampo.tipodato.toLowerCase()) {
+				case "float":
+					//xNuevo = FormatearNumero(xNuevo, xCampo.cantidaddecimales)
+					agregarCeldaFloat(xHoja, row, col, xValue)
+					if (xConfigurador.muestratotales == true){
+						if ( xCampo.totaliza == true){
+							xDicTotales =  registrarvalor(xDicTotales, xCampo.nombresql, xValue)
+							if (xHayCorteControl == true){
+								xDicCorteControl = registrarvalor(xDicCorteControl, xCampo.nombresql, xValue)
+							}
+						}
+					}
+					break;
+				case "date":
+					//xNuevo = self.stringToFWDate(xValorOri)
+					agregarCelda(xHoja, row, col, self.stringToFWDate(xValue)) 
+					break;
+				default:
+					agregarCelda(xHoja, row, col, xValue) 
+			}
+			col = col + 1;
+		}
+		
+		xCorteAnterior = xCorteControlActual 
+		row = row + 1;
+    }
+	if (xHayCorteControl == true){
+		agregartotales(xDicCorteControl, xCampos, xHoja, row, false)
+		row = row + 1;
+	}
+	if (xConfigurador.muestratotales == true && row > 1 ){
+		agregartotales(xDicTotales, xCampos, xHoja, row, true)
+	}
+}
+
+function llenarVector(xRow, xCampos){
+	var resultado = ""
+	for(var xCamposN in xCampos.results){
+		var xCampo = xCampos.results[xCamposN]
+		if (xCampo.cortecontrol == true){
+			resultado = resultado + xRow[xCampo.nombresql.toLowerCase()] + ";***;"
+		}
+	}
+	return resultado
+}
+
+function agregarCelda(xHoja, row, columna, valor){
+	var cell = {};
+      cell.row = row;
+      cell.column = columna;
+      cell.value = valor;
+      xHoja.cells.push(cell);
+} 
+
+function agregarCeldaFloat(xHoja, fila, columna, valor){
+	var cell = {};
+      cell.row = fila;
+      cell.column = columna;
+      cell.value = valor;
+      cell.format = "#,##0.00";
+      xHoja.cells.push(cell);
+}
+
+function formatCelda( xValorOri, xCampo){
+	var xNuevo = xValorOri
+	switch(xCampo.tipodato.toLowerCase()) {
+		case "float":
+			xNuevo = FormatearNumero(xNuevo, xCampo.cantidaddecimales)
+			break;
+		case "date":
+			xNuevo = self.stringToFWDate(xValorOri)
+			break;
+		default:
+			xNuevo = xValorOri
+	}
+	return xNuevo
+}
+
+function FormatearNumero(x, posiciones) {
+  var s = x.toString()
+  var l = s.length
+  var decimalLength = s.indexOf('.') + 1
+
+  if (l - decimalLength <= posiciones){
+    return x
+  }
+  var isNeg  = x < 0
+  var decimal =  x % 1
+  var entera  = isNeg ? Math.ceil(x) : Math.floor(x)
+  var decimalFormated = Math.floor(
+    Math.abs(decimal) * Math.pow(10, posiciones)
+  )
+  var finalNum = entera + 
+    ((decimalFormated / Math.pow(10, posiciones))*(isNeg ? -1 : 1))
+  
+  return finalNum
+}
+
+function HayCorteControl(xCampos){
+	var resultado = false
+	for(var xCamposN in xCampos.results){
+        var xCampo = xCampos.results[xCamposN];
+		if (xCampo.cortecontrol == true){
+			resultado = true
+		}
+	}
+	return resultado
+}
+
+function getDicTotales(xCampos){
+	var dict = []
+	for(var xCamposN in xCampos.results){
+        var xCampo = xCampos.results[xCamposN];
+		if (xCampo.tipodato == "Float" &&  xCampo.totaliza == true){
+			itemDic = {}
+			itemDic.key = xCampo.nombresql
+			itemDic.value = 0
+			dict.push(itemDic)
+		}
+	}
+	return	dict
+}
+function registrarvalor(xDic, xKey, xValue){
+	for (var item in xDic) {
+		var xItem = xDic[item]
+		if (xItem.key == xKey){
+			xItem.value = xItem.value + xValue
+		}
+	}
+	return  xDic
+}
+function getValueDic(xDic, xKey){
+	var xValue = 0
+	for (var item in xDic) {
+		var xItem = xDic[item]
+		if (xItem.key == xKey){
+			xValue = xItem.value 
+		}
+	}
+	return xValue
+}
+function agregartotales(xDic, xCampos, xHoja, row, esTotal){
+	var col = 0 
+	var cell = {}
+	cell.row = row
+	cell.column = col
+
+	if (esTotal == true){
+		cell.value = "TOTAL GENERAL"
+	}else{
+		cell.value = "SUB TOTAL"
+	}
+	xHoja.cells.push(cell)
+	for(var xCamposN in xCampos.results){
+        var xCampo = xCampos.results[xCamposN]
+		if (xCampo.tipodato == "Float" &&  xCampo.totaliza == true){
+			agregarCeldaFloat(xHoja, row, col, getValueDic(xDic, xCampo.nombresql))
+		}
+		col = col + 1
+    }
+	if ( esTotal == false){
+		for (var item in xDic) {
+			var xItem = xDic[item]
+			xItem.value = 0 
+		}
+	}
+}
+
+
+function InterpretarQuery(xQuery, xMotorBD){
+	// P	PostgreSQL
+	// S	MS SQL Server
+	// O	Oracle
+	xResult = xQuery
+	if (xMotorBD == "O" ){
+	    xResult = replaceAll( xResult, 'SUBSTRING','SUBSTR')
+		xResult = replaceAll( xResult, 'VARCHAR)','VARCHAR2(4000)')
+		xResult = replaceAll( xResult, 'VARCHAR )','VARCHAR2(4000)')
+		xResult = replaceAll( xResult, '::VARCHAR','')
+		xResult = replaceAll( xResult, '::NUMERIC','')
+		xResult = replaceAll( xResult, 'REPEAT','RPAD')
+		xResult = replaceAll( xResult, 'string_agg','LISTAGG')
+	 	
+	}else{
+		//para futuras versiones
+	}
+	return xResult;
+}
+
+function replaceAll(str, find, replace) {
+  var i = str.indexOf(find);
+  if (i > -1){
+    str = str.replace(find, replace); 
+    i = i + replace.length;
+    var st2 = str.substring(i);
+    if(st2.indexOf(find) > -1){
+      str = str.substring(0,i) + replaceAll(st2, find, replace);
+    }       
+  }
+  find = find.toUpperCase() // busco en mayuscula 
+  var i = str.indexOf(find);
+  if (i > -1){
+    str = str.replace(find, replace); 
+    i = i + replace.length;
+    var st2 = str.substring(i);
+    if(st2.indexOf(find) > -1){
+      str = str.substring(0,i) + replaceAll(st2, find, replace);
+    }       
+  }
+  
+  find = find.toLowerCase() // busco en mayuscula 
+  var i = str.indexOf(find);
+  if (i > -1){
+    str = str.replace(find, replace); 
+    i = i + replace.length;
+    var st2 = str.substring(i);
+    if(st2.indexOf(find) > -1){
+      str = str.substring(0,i) + replaceAll(st2, find, replace);
+    }       
+  }
+  
+  return str;
+}
+
+function generarFile(camposConfigurador, xQueryPrincipal, xMotorBD, xName, xFormato){
+	var queryTXT = ""
+	var xSubQuery = ""
+	var xHeader = ""
+	for(var nCampo in camposConfigurador.results){
+		var xCampo = camposConfigurador.results[nCampo];
+		xHeader = xHeader + xCampo.nombresql + ";"
+		var xNombreSQL = getNombreSQL(xCampo)
+		if (xSubQuery != ""){
+			xSubQuery = xSubQuery + " || " + xNombreSQL + " || ';' "
+		}else{
+			xSubQuery = xSubQuery + " " + xNombreSQL + " || ';' "
+		}
+	}
+	if ( xSubQuery != "" ){
+		xSubQuery = "select  string_agg((" +  xSubQuery + ") , chr(13)) resultado from ( "
+		queryTXT = xSubQuery + xQueryPrincipal + " )auxConf "
+	}
+	queryTXT = InterpretarQuery(queryTXT, xMotorBD) 
+	
+	var xResult = JSON.parse(self.getQueryResult(queryTXT));
+			
+	for(var xResN in xResult.results){
+	  var xRes = xResult.results[xResN];
+	  var file = {}
+	  file.fileName = xName + "." + xFormato
+	  file.content = xHeader + "\n" +  xRes.resultado
+	}
+	return file
+}
+
+
+
+
+
+
+
+
