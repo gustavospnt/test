@@ -1,0 +1,326 @@
+public xIdTipoRecibo
+sub main 
+'InteresesFinancieros
+stop
+	returnvalue = true
+	set oTr = ProcesoInteres.value 
+	if classname(oTr) = "MENSAJEPS" then set oTr = oTr.originante
+	if oTr.estado = "C" then exit sub 
+
+	set oFlag = oTR.flag 
+	call EjecutarTransicion( oTr, "En Proceso" )
+	
+	' set oTr = self
+	xIdTipoRecibo = "2d972a92-568c-11d5-b612-0050dac017be"
+	stop
+	oTR.boextension.totalvalores = 0
+	oTR.boextension.totalponderacion = 0 
+	if oTR.boextension.tasatotal <= 0 then 
+		BOShowMessage "La tasa Total tiene que ser un numero mayor que cero"
+		exit sub 
+	' elseif oTR.destinatario is nothing then 
+		' BOShowMessage "El Destinatario (cliente) es requerido"
+		' exit Sub
+	elseif oTR.trextension.esquemaoperativo is nothing then 
+		BOShowMessage "El esquema Operativo es requerido"
+		exit Sub
+	elseif oTR.trextension.esquemaoperativo.boextension.REFERENCIAIF is nothing then 
+		BOShowMessage "Falta definir en el Esquema Operativo el concepto default, complete campo 'Referencia Interes Financiero' en el Esquema Operativo"
+		exit Sub
+	end if 
+	oTR.flag = oFlag
+	if oTr.workspace.intransaction then oTr.workspace.commit
+	xCoeficiente = oTR.boextension.coeficiente
+	xTrasaTotal = oTR.boextension.tasatotal
+	xDiasGracia = oTR.boextension.diasgracia
+	if oTR.boextension.sindiasgracia then 
+		xDiasGracia = 0
+	end if 
+
+	oTr.boextension.itemsinteresesfinancieros.clear()
+	
+	call SelectSQL("delete from  CLASSID  WHERE objid in ( select id from ud_valoresinteresesfinanc WHERE transaccion_id = '" & oTr.ID  & "' ) ", oTr.workspace)
+	call SelectSQL("delete from  ud_valoresinteresesfinanc  WHERE transaccion_id = '" & oTr.ID  &"' ", oTr.workspace)
+	call SelectSQL("COMMIT", oTr.workspace)
+
+	'clientes'
+	set xVistaCliente = newcompoundview(oTR,"CLIENTE",oTR.workspace,nil,true)
+	xVistaCliente.addfilter(newfilterspec(xVistaCliente.columnfrompath("activestatus"),"=", 0))
+	xVistaCliente.addfilter(newfilterspec(xVistaCliente.columnfrompath("[ud_cliente]boextension.exentointeres"),"=", false))
+	xVistaCliente.addfilter(newfilterspec(xVistaCliente.columnfrompath("[ud_cliente]boextension.esquemaoperativo"),"=", oTR.trextension.esquemaoperativo))
+	xVistaCliente.addordercolumn(NewOrderSpec(xVistaCliente.columnfrompath("[PERSONA]enteasociado.nombre"),false))
+	i = 0
+	for each vClie in xVistaCliente.viewitems
+		call RegistrarActividadPlaunch( "Trabajando" )
+		set oCliente = vClie.bo
+		xTotalInteresCliente = 0 
+		totalvalores = 0 
+		totalponderacion = 0 
+
+		set xContainer = NewContainer
+		set xBucket = NewBucket: xBucket.Value = "00000000-0000-0000-0000-000000000000": xContainer.Add(xBucket)
+		set xVistaRecibos = GenerarVista(oTr, oCliente, xContainer)
+		set oRecibos = NewContainer
+		set oFacturas = NewContainer
+		set oItemsProcesar = GetRecibosImputados(xVistaRecibos, xIDsRecibos, oRecibos, oFacturas)
+		if oRecibos.size > 0 then 
+			xSQLValores = GetQueryValores(oTR, xIDsRecibos,false, oCliente)
+			if xSQLValores <> "" then 
+				xInsertSQL = "INSERT INTO ud_valoresinteresesfinanc(id, transaccion_id, itemtransaccion_id, nombretr, nombrevalor,  fecharecibo,  fechavencimiento,  importe,  importebase,  atraso,  ponderacion, operadorcomercial_id ) "
+				xSqlText = xInsertSQL & vbCrlf & xSQLValores
+				call UpdateSQL(xSqlText ,oTR.WorkSpace)
+				Call RegistrarClassID("ud_valoresinteresesfinanc", oTr, oTr.id , "transaccion_id")
+				
+				'Completamos totales '
+				set  oResult = SelectSQL( GetQueryValores(oTR, xIDsRecibos,true, oCliente), oTR.WorkSpace)
+				for each xItem in oResult
+					totalvalores = xItem.attributes("TOTAL_IMPORTE_BASE").asFloat 
+					totalponderacion = xItem.attributes("TOTAL_PONDERACION_BASE").asFloat 
+				next 
+				if totalvalores <> 0 then 
+					AtrasoRecibo = Int(totalponderacion / totalvalores) 'Se toma para calcular el atraso Recibo
+					'if AtrasoRecibo >= 1 then 
+						for each xItemImput in oItemsProcesar
+							i = i + 1
+							xClaseOrigen = classname(xItemImput.originante)
+							call GetDatoComprobante(xItemImput, oFactuta, oRecibo)
+							if xClaseOrigen = "CPRECIBO" OR xClaseOrigen = "CPCREDITO" then 
+								xMora = xItemImput.originante.fechavencimiento - xItemImput.destinatario.fechavencimiento
+							Else
+								xMora = xItemImput.destinatario.fechavencimiento - xItemImput.originante.fechavencimiento
+							end if 
+							if not oFactuta is nothing then 
+								set oNodo = Nothing
+								if not oFactuta.boextension is nothing then 
+									if not oFactuta.boextension.attributes("NODO") is nothing then 
+										set oNodo = oFactuta.boextension.nodo
+									end if 
+								end if 
+								set newitem = CrearBO("UD_ITEMINTERESFINANCIERO", oTr)
+								oTr.boextension.itemsinteresesfinancieros.add(newitem)
+								newitem.cliente = oCliente 
+								newitem.coeficiente = xCoeficiente 
+								newitem.fechaactual = oRecibo.fechaactual
+								newitem.recibo = oRecibo
+								newitem.numerodocumento = oRecibo.numerodocumento
+								newitem.fechaemision = oFactuta.fechaactual
+								newitem.comprobante = oFactuta
+								newitem.fechavencimiento = oFactuta.compromisopago.fechavencimiento
+								newitem.totalfactura = oFactuta.total.importe
+								newitem.diasmora = int(xMora) 
+								newitem.atrasorecibo = AtrasoRecibo
+								newitem.diasgracia = xDiasGracia
+								xAtraso = newitem.diasmora + AtrasoRecibo - newitem.diasgracia
+								if xAtraso > 0 then newitem.atrasototal =  xAtraso else newitem.atrasototal = 0
+								newitem.importecancelado = xItemImput.valor2_importe
+								newitem.intereses = Round(newitem.importecancelado * newitem.atrasototal * xTrasaTotal/100, 2)
+								newitem.numeroitem  = i	
+								newitem.nodo = oNodo
+								xTotalInteresCliente = xTotalInteresCliente + newitem.intereses 
+							end if 
+						next 
+						'call CrearItem(oTR, oCliente, oNodo, xTotalInteresCliente) 
+					'Else
+						' BOShowMessage "El cliente no tiene Indice de Mora"
+					'end if
+				end if 
+			end if 
+		end if 
+	next 
+	if oTr.workspace.intransaction then oTr.workspace.commit
+	
+	'Creamos los items '
+	xTotalInteres = 0 
+	oTR.itemstransaccion.clear()
+	xSql = " select cliente_id, " &_ 
+		"   nodo_id, " &_
+		"   Round(sum(intereses), 2) total " &_
+		" from UD_ITEMINTERESFINANCIERO  " &_
+		" where bo_place_id = '" & oTr.boextension.itemsinteresesfinancieros.id & "'" &_
+		" group by cliente_id, nodo_id " 
+	set xresult = selectsql(xSql, oTr.workspace)
+	for each xitem in xResult
+		set oCliente = nothing
+		set oNodo = nothing
+		xClienteID = xitem.attributes("cliente_id").asstring
+		xNodoID = xitem.attributes("nodo_id").asstring
+		xTotalInteresCliente = xitem.attributes("total").asFloat
+		if xClienteID <> "" and xTotalInteresCliente > 0 then 
+			set oCliente = ExisteBO3( oTr, "CLIENTE", "ID", xClienteID, nothing, true, false, "=" )
+			if xNodoID <> "" then 	set oNodo = ExisteBO3( oTr, "UD_DATOSNODO", "ID", xNodoID, nothing, true, false, "=" )
+			call CrearItem(oTR, oCliente, oNodo, xTotalInteresCliente) 
+			xTotalInteres = xTotalInteres + xTotalInteresCliente
+		end if 
+	next
+	oTr.total.importe = xTotalInteres
+	oTr.flag = ExisteBO(oTr, "FLAG", "id", "4e9bca57-8492-4e2b-a887-2ad423040248", nil, false, false, "=" )
+	if oTr.workspace.intransaction then oTr.workspace.commit
+end sub 
+
+Private Function GetRecibosImputados(xVistaRecibos, xIDsRecibos, oRecibos, oFacturas)
+	set oItemsImputacion = NewContainer
+	set oRecibos = NewContainer
+	set oFacturas = NewContainer
+	xIDsRecibos = "'00000000-0000-0000-0000-000000000000'"
+	for each xItem in xVistaRecibos.viewitems
+		set ItemImputacion = xItem.bo
+		set oTransaccion = ItemImputacion.placeowner
+		' if NOT estaDesimputada(oTransaccion) then 
+			call GetDatoComprobante(ItemImputacion, oFactuta, oRecibo)
+			if not oRecibo is nothing and NOT oFactuta is nothing then 
+				oItemsImputacion.add(ItemImputacion)
+				xIDsRecibos = xIDsRecibos & ", '" & oRecibo.id & "'"
+				oRecibos.add(oRecibo)
+				oFacturas.add(oFactuta)
+			end if 
+		' end if 
+	next 
+	set GetRecibosImputados = oItemsImputacion
+end Function
+
+Private Function GetDatoComprobante(ItemImputacion, oFactuta, oRecibo)
+	set oFactuta = nothing
+	set oRecibo = nothing
+	if NOT ItemImputacion.originante.troriginante.trextension.reversion AND NOT ItemImputacion.destinatario.troriginante.trextension.reversion then 
+		if classname(ItemImputacion.originante.troriginante) = "TRINGRESOVALORES" or classname(ItemImputacion.originante.troriginante) = "TRINGRESOVALORES" then 
+			set oRecibo = ItemImputacion.originante.troriginante
+			set oFactuta = ItemImputacion.destinatario.troriginante
+		elseif classname(ItemImputacion.destinatario.troriginante) = "TRINGRESOVALORES" or classname(ItemImputacion.originante.troriginante) = "TRINGRESOVALORES"  then 
+			set oRecibo = ItemImputacion.destinatario.troriginante
+			set oFactuta = ItemImputacion.originante.troriginante
+		end if 
+	end if 
+end Function
+
+private function estaDesimputada(oTransaccion)
+	set oView = NewCompoundView( oTransaccion, "ITEMTRDESIMPUTACION", oTransaccion.Workspace, nothing, false )
+	oView.addFilter( NewFilterSpec( oView.Columnfrompath("REFERENCIA"), "=", oTransaccion ))
+	if oview.viewitems.isempty then estaDesimputada = false else estaDesimputada = true
+end function
+
+Private Function GenerarVista(oTransaccion, oCliente, xContainerExcluir)
+	xdesde = GetFormatoFecha(oTransaccion.boextension.FECHADESDE,"AAAAMMDD")
+	xHasta = GetFormatoFecha(oTransaccion.boextension.FECHAHASTA,"AAAAMMDD")
+	' xHasta.AddDays(1)
+	
+	xSQL = " and ( "
+    xSQL = xSQL & "  (case when ALIAS_1.TIPOTRANSACCION_ID = '" & xIdTipoRecibo & "' "
+    xSQL = xSQL & "              and left(ALIAS_1.fechaemision, 8) >= '" & xDesde  & "' and left(ALIAS_1.fechaemision,8) <= '" & xHasta & "'  "
+	xSQL = xSQL & "                  then True else False end "
+    xSQL = xSQL & "      ) or "
+    xSQL = xSQL & "      (case when ALIAS_2.TIPOTRANSACCION_ID = '" & xIdTipoRecibo & "' "
+    xSQL = xSQL & "              and left(ALIAS_2.fechaemision,8) >= '" & xDesde  & "' and left(ALIAS_2.fechaemision,8) <= '" & xHasta & "'  "
+    xSQL = xSQL & "              then True else False end  "
+    xSQL = xSQL & "      ) "
+    xSQL = xSQL & "  ) "
+	xSQL = xSQL & " AND ALIAS_0.PLACEOWNER_ID NOT IN (SELECT REFERENCIA_ID FROM ITEMTRDESIMPUTACION) "
+	xSQL = xSQL & " AND ( ALIAS_1.operadorcomercial_id = '" & oCliente.id & "' or  ALIAS_2.operadorcomercial_id = '" & oCliente.id & "') "
+	
+	xEndBlock = xSQL
+
+	set xVista =  NewCompoundView( oTransaccion, "ITEMTRIMPUTACION", oTransaccion.Workspace, nothing, false )
+	xVista.addFilter( NewFilterSpec( xVista.Columnfrompath("tipotransaccion"), "=", "9b9915ae-4fa6-11d5-b060-004854841c8a")) 'imputacion de venta'
+	xVista.AddFilter(NewInEnumFilterSpec(xVista.ColumnFromPath("ID"), xContainerExcluir, FALSE)) 'EXCLUIR LOS DEL CONTAINER PORQUE YA ESTAN EN LA TRANSACCION'
+	
+	set xFiltro	= NewFilterSpec(xVista.columnFromPath("[COMPROMISOPAGO]ORIGINANTE.tipotransaccion"), "=", xIdTipoRecibo) 'RECIOS DE COBRANZA'
+	xFiltro.beginblock= "("
+	xVista.addFilter(xFiltro)
+	set xFiltro	= NewFilterSpec(xVista.columnFromPath("[COMPROMISOPAGO]DESTINATARIO.tipotransaccion"), "=", xIdTipoRecibo)'RECIOS DE COBRANZA'
+	xFiltro.endblock= ") " & xEndBlock
+	xFiltro.conector = "or"
+	xVista.addFilter(xFiltro)
+	set GenerarVista = xVista
+end function
+
+private Function GetQueryValores(oTR, xRecibosSTR,EsTotal, oCliente)
+	xSQL = "	SELECT 	 " & vbcrlf
+	if EsTotal then 
+		xSQL = xSQL & " sum(ROUND(I.VALOR2_IMPORTE * TR.COTIZACION, 2)) TOTAL_IMPORTE_BASE,	 " & vbcrlf
+		xSQL = xSQL & " SUM(Round(i.valor2_importe * tr.cotizacion, 2) * CASE	 " & vbcrlf
+		xSQL = xSQL & "    WHEN DATE(DC.FECHAVENCIMIENTO) > DATE(LEFT(I.FECHADOCUMENTO, 8))	 " & vbcrlf
+		xSQL = xSQL & "    THEN DATE(DC.FECHAVENCIMIENTO) - DATE(LEFT(I.FECHADOCUMENTO, 8))	 " & vbcrlf
+		xSQL = xSQL & "    ELSE 0	 " & vbcrlf
+		xSQL = xSQL & "   END)  TOTAL_PONDERACION_BASE	 " & vbcrlf
+	else
+		'gs2024-06 cambio esta parte tck 19154
+		'	xSQL = xSQL & "   CASE	 " & vbcrlf
+		'xSQL = xSQL & "    WHEN DATE(DC.FECHAVENCIMIENTO) > DATE(LEFT(I.FECHADOCUMENTO, 8))	 " & vbcrlf
+		'xSQL = xSQL & "   THEN DC.FECHAVENCIMIENTO	 " & vbcrlf
+		'xSQL = xSQL & "   ELSE LEFT(I.FECHADOCUMENTO, 8)	 " & vbcrlf
+		'xSQL = xSQL & " END FECHAVENCIMIENTO,	 " & vbcrlf
+		
+		'por esto 
+		'xSQL = xSQL & "   DC.FECHAVENCIMIENTO	 FECHAVENCIMIENTO,	 " & vbcrlf
+		'gs2024-06-------fin cambio
+		
+			
+		xSQL = xSQL & " NUEVOID() ID, 	 " & vbcrlf
+		xSQL = xSQL & " '" & oTR.ID & "' TRANSACCION_ID, 	 " & vbcrlf
+		xSQL = xSQL & " I.ID ITEMTRANSACCION_ID, 	 " & vbcrlf
+		xSQL = xSQL & " I.NOMBRETR NOMBRETR, 	 " & vbcrlf
+		xSQL = xSQL & " I.DESCRIPCION NOMBREVALOR,	 " & vbcrlf
+		xSQL = xSQL & "   LEFT(I.FECHADOCUMENTO, 8) FECHARECIBO,	 " & vbcrlf
+		
+		xSQL = xSQL & "   DC.FECHAVENCIMIENTO	 FECHAVENCIMIENTO,	 " & vbcrlf
+		
+		xSQL = xSQL & " I.VALOR2_IMPORTE IMPORTE,	 " & vbcrlf
+		xSQL = xSQL & " ROUND(I.VALOR2_IMPORTE * TR.COTIZACION, 2) IMPORTEBASE,	 " & vbcrlf
+		xSQL = xSQL & "   CASE	 " & vbcrlf
+		xSQL = xSQL & "    WHEN DATE(DC.FECHAVENCIMIENTO) > DATE(LEFT(I.FECHADOCUMENTO, 8))	 " & vbcrlf
+		xSQL = xSQL & "    THEN DATE(DC.FECHAVENCIMIENTO) - DATE(LEFT(I.FECHADOCUMENTO, 8))	 " & vbcrlf
+		xSQL = xSQL & "    ELSE 0	 " & vbcrlf
+		xSQL = xSQL & "   END ATRASO, 	 " & vbcrlf
+		xSQL = xSQL & "   	 " & vbcrlf
+		xSQL = xSQL & "   ROUND(I.VALOR2_IMPORTE * TR.COTIZACION, 2) * 	 " & vbcrlf
+		xSQL = xSQL & "   CASE	 " & vbcrlf
+		xSQL = xSQL & "    WHEN DATE(DC.FECHAVENCIMIENTO) > DATE(LEFT(I.FECHADOCUMENTO, 8))	 " & vbcrlf
+		xSQL = xSQL & "    THEN DATE(DC.FECHAVENCIMIENTO) - DATE(LEFT(I.FECHADOCUMENTO, 8))	 " & vbcrlf
+		xSQL = xSQL & "    ELSE 0	 " & vbcrlf
+		xSQL = xSQL & "   END  PONDERACION, 	 " & vbcrlf
+		xSQL = xSQL & "   '" & oCliente.id & "'  OPERADORCOMERCIAL_ID 	 " & vbcrlf
+	end if 
+	xSQL = xSQL & "FROM ITEMINGRESOVALORES I	 " & vbcrlf
+	xSQL = xSQL & "JOIN TRINGRESOVALORES TR ON TR.ITEMSTRANSACCION_ID = I.BO_PLACE_ID 	 " & vbcrlf
+	xSQL = xSQL & "JOIN V_DATOCOMPVALOR DC ON DC.ID = I.DATOSCOMPLEMENTARIOS_ID	 " & vbcrlf
+	xSQL = xSQL & "WHERE I.ESTADOTR = 'C'	 " & vbcrlf
+	xSQL = xSQL & "		AND TR.ID IN (" & xRecibosSTR & ")	 " & vbcrlf
+	GetQueryValores = xSQL
+end Function
+
+function GetFormatoFecha(xFecha,xFormato)
+   GetFormatoFecha = ""
+   xAnio = cstr(year(xFecha))	
+   xMes = string(2-len(month(xfecha)),"0") & cstr(month(xfecha))
+   xDia = string(2-len(day(xfecha)),"0") & cstr(day(xfecha))
+   
+   select case xFormato 
+	   case "DDMMAAAA"  GetFormatoFecha = xDia & xMes & xAnio
+	   case "AAAAMMDD"  GetFormatoFecha = xAnio & xMes & xDia
+	   case "DDMMAA"    GetFormatoFecha = xDia & xMes & mid(xAnio, 3)
+	   case "AAAAMM"	GetFormatoFecha = xAnio & xMes
+   end select 
+end function
+
+Sub RegistrarClassID(xClassName, oObjeto, xID, nCampo)
+	xClassID = ""
+	xSql = "SELECT CLASSID FROM CLASSNAME WHERE upper(CLASSNAME) = upper('"& xClassname &"')"
+	set xresult = selectsql(xsql, oObjeto.workspace)
+	for each xitem in xResult
+		xClassID = xitem.attributes("classid").asstring	
+	next	
+	If xClassID <> "" then 
+		xQuery = " INSERT INTO CLASSID( CLASSID,OBJID) " & _ 
+				" SELECT '"& xClassId &"', ID FROM " & xClassName & " WHERE " & nCampo & " = '"& xID &"' " & _ 
+				" AND ID NOT IN (SELECT OBJID FROM CLASSID WHERE CLASSID = '"& xClassID &"' ) "
+		call selectSQL(xQuery, oObjeto.workspace)
+		call SelectSQL("COMMIT", oObjeto.workspace)
+	end if 
+End Sub
+
+Private Function CrearItem(oTR, oCliente, oNodo, xTotalInteres)
+	set oItem = CrearItemTransaccion(oTR)
+	oItem.referencia = oTR.trextension.esquemaoperativo.boextension.referenciaif
+	oItem.boextension.cliente = oCliente
+	oItem.boextension.nodo = oNodo
+	oItem.cantidad.cantidad = xTotalInteres
+end Function
